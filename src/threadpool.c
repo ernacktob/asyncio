@@ -7,6 +7,7 @@
 #include <sys/errno.h>
 
 #include "threadpool.h"
+#include "cancellations.h"
 #include "queue.h"
 #include "safe_malloc.h"
 #include "logging.h"
@@ -45,12 +46,6 @@ struct worker_thread_info {
 /* END STRUCT DEFINITIONS */
 
 /* PROTOTYPES */
-static void disable_cancellations(int *oldstate);
-static void restore_cancelstate(int oldstate);
-static void set_cancelstate(int state, int *oldstate);
-static void restore_canceltype(int oldtype);
-static void set_canceltype(int type, int *oldtype);
-
 static void unlock_finished_cond_mtx(void *arg);
 
 static void notify_handle_finished(struct threadpool_handle *handle);
@@ -89,78 +84,6 @@ uint64_t contractors_count = 0;						/* Protected by contractors_mtx */
 decl_queue(struct threadpool_handle, contractors_task_queue);		/* Protected by contractors_mtx */
 static int contractors_initialized = 0;					/* Protected by contractors_mtx */
 /* END GLOBALS */
-
-static void disable_cancellations(int *oldstate)
-{
-	int rc;
-
-	ASYNCIO_DEBUG_ENTER(1 ARG("%p", oldstate));
-	ASYNCIO_DEBUG_CALL(3 FUNC(pthread_setcancelstate) ARG("%d", PTHREAD_CANCEL_DISABLE) ARG("%p", oldstate));
-	if ((rc = pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, oldstate)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_setcancelstate");
-	}
-
-	ASYNCIO_DEBUG_RETURN(VOIDRET);
-}
-
-static void restore_cancelstate(int oldstate)
-{
-	int oldstate1;
-	int rc;
-
-	ASYNCIO_DEBUG_ENTER(1 ARG("%p", oldstate));
-	ASYNCIO_DEBUG_CALL(3 FUNC(pthread_setcancelstate) ARG("%d", oldstate) ARG("%p", &oldstate1));
-	if ((rc = pthread_setcancelstate(oldstate, &oldstate1)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_setcancelstate");
-	}
-
-	ASYNCIO_DEBUG_RETURN(VOIDRET);
-}
-
-static void set_cancelstate(int state, int *oldstate)
-{
-	int rc;
-
-	ASYNCIO_DEBUG_ENTER(2 ARG("%d", state) ARG("%p", oldstate));
-	ASYNCIO_DEBUG_CALL(3 FUNC(pthread_setcancelstate) ARG("%d", state) ARG("%p", oldstate));
-	if ((rc = pthread_setcancelstate(state, oldstate)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_setcancelstate");
-	}
-
-	ASYNCIO_DEBUG_RETURN(VOIDRET);
-}
-
-static void restore_canceltype(int oldtype)
-{
-	int oldtype1;
-	int rc;
-
-	ASYNCIO_DEBUG_ENTER(1 ARG("%d", oldtype));
-	ASYNCIO_DEBUG_CALL(3 FUNC(pthread_setcanceltype) ARG("%d", oldtype) ARG("%p", &oldtype1));
-	if ((rc = pthread_setcanceltype(oldtype, &oldtype1)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_setcanceltype");
-	}
-
-	ASYNCIO_DEBUG_RETURN(VOIDRET);
-}
-
-static void set_canceltype(int type, int *oldtype)
-{
-	int rc;
-
-	ASYNCIO_DEBUG_ENTER(2 ARG("%d", type) ARG("%p", oldtype));
-	ASYNCIO_DEBUG_CALL(3 FUNC(pthread_setcanceltype) ARG("%d", type) ARG("%p", oldtype));
-	if ((rc = pthread_setcanceltype(type, oldtype)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_setcanceltype");
-	}
-
-	ASYNCIO_DEBUG_RETURN(VOIDRET);
-}
 
 static void unlock_finished_cond_mtx(void *arg)
 {
