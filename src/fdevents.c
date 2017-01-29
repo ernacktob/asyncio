@@ -764,11 +764,11 @@ static void fdevents_loop(void *arg)
 
 		/* Scan for events */
 		for (i = 0; i < nfds; i++) {
-			if (fds[i].revents & (fds[i].events | POLLERR | POLLHUP | POLLNVAL)) {
+			if (fds[i].revents & fds[i].events) {
 				queue_foreach(&worker_info->callbacks[i], handle, next) {
 					next = handle->next; /* The handle might get removed and the next pointer overwritten otherwise */
 
-					if (fds[i].revents & (handle->events | POLLERR | POLLHUP | POLLNVAL)) {
+					if (fds[i].revents & handle->events) {
 						/* First pass (locked): just make a copy of the callback queues */
 						/* Second pass (unlocked): with the copies, actually process and dispatch threadpool, etc. */
 						/* Could use different links for next and prev in the copy, to avoid overwriting ->next and ->prev,
@@ -807,33 +807,16 @@ static void fdevents_loop(void *arg)
 							continue;
 						}
 
-						if (lock_fdevent_handle(handle) != 0) {
-							threadpool_cancel(threadpool_handle);
-							threadpool_join(threadpool_handle);
-							/* XXX If this one fails, we're in bad shape... */
-							/* ressource leak? worse? */
-							continue;
-						}
-
 						handle->revents = fds[i].revents;
 						handle->threadpool_handle = threadpool_handle;
 						handle->in_threadpool = 1;
 
-						unlock_fdevent_handle(handle);
-
-						if (handle->flags & FDEVENT_FLAG_ONESHOT) {
-							/* XXX implement a re-register API func to reuse same handle in ONESHOT if they wish */
-							/* Remove our own reference (keep that of the threadpool, though) */
-							remove_fdevents_locked(worker_info, handle); /* XXX Will need to lock first if we move that in the unlocked loop */
-							fdevent_release_handle(handle);
-						} else {
-							/* Mask events until they have been processed to avoid duplicates from poll() */
-							decrement_fdevent_refcount_locked(&worker_info->fdevent_refcounts[i], handle->events); /* XXX Will need lock on worker_info */
-							worker_info->fds[i].events = get_eventsmask_from_fdevent_refcount_locked(&worker_info->fdevent_refcounts[i]); /* XXX Same here */
-							increment_fdevent_refcount_locked(&worker_info->fdevent_refcounts[i], handle->events); /* We still want to count the saved_events */
-							handle->saved_events = handle->events;
-							handle->events = 0; /* NOTE: This won't mask in case of POLLERR, POLLHUP or POLLNVAL. Still in the queue... */
-						}
+						/* Mask events until they have been processed to avoid duplicates from poll() */
+						decrement_fdevent_refcount_locked(&worker_info->fdevent_refcounts[i], handle->events); /* XXX Will need lock on worker_info */
+						worker_info->fds[i].events = get_eventsmask_from_fdevent_refcount_locked(&worker_info->fdevent_refcounts[i]); /* XXX Same here */
+						increment_fdevent_refcount_locked(&worker_info->fdevent_refcounts[i], handle->events); /* We still want to count the saved_events */
+						handle->saved_events = handle->events;
+						handle->events = 0;
 					}
 				}
 			}

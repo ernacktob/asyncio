@@ -69,28 +69,92 @@ static int create_accept_sock(void)
 	return accept_sock;
 }
 
-static void on_read(int fd, short revents, void *arg)
+static void on_readable(int fd, short revents, void *arg)
 {
+	char byte;
+	ssize_t rb;
+
+	printf_locked("on_readable: revents = %hd, arg = %p\n", revents, arg);
+	rb = recv(fd, &byte, sizeof byte, 0);
+
+	if (rb < 0) {
+		printf_locked("recv failed\n");
+		close(fd);
+		return;
+	}
+
+	if (rb == 0) {
+		printf_locked("client closed connection.\n");
+		close(fd);
+		return;
+	}
+
+	printf_locked("Received byte: %c\n", byte);
+	close(fd);
+}
+
+static void on_writable(int fd, short revents, void *arg)
+{
+	struct fdevent_info evinfo;
+	fdevent_handle_t handle;
+	ssize_t sb;
+
+	printf_locked("on_writable: revents = %hd, arg = %p\n", revents, arg);
+	sb = send(fd, "HELLO WORLD\n", strlen("HELLO WORLD\n"), 0);
+
+	if (sb < 0) {
+		printf_locked("send failed\n");
+		close(fd);
+		return;
+	}
+
+	evinfo.fd = fd;
+	evinfo.events = FDEVENT_EVENT_POLLIN;
+	evinfo.flags = FDEVENT_FLAG_ONESHOT;
+	evinfo.cb = on_readable;
+	evinfo.arg = NULL;
+
+	if (fdevent_register(&evinfo, &handle) != 0) {
+		printf_locked("Failed to register on_readable.\n");
+		close(fd);
+		return;
+	}
+
+	fdevent_release_handle(handle);
+}
+
+static void on_connect(int fd, short revents, void *arg)
+{
+	struct fdevent_info evinfo;
+	fdevent_handle_t handle;
 	int client_sock;
 	struct sockaddr dummy_addr;
 	socklen_t dummy_len;
-	char byte;
 
 	dummy_len = sizeof dummy_addr;
-	printf_locked("on_read: revents = %hd, arg = %p\n", revents, arg);
+	printf_locked("on_connect: revents = %hd, arg = %p\n", revents, arg);
 
 	client_sock = accept(fd, &dummy_addr, &dummy_len);
 
 	if (client_sock < 0) {
-		perror("accept");
+		printf_locked("accept failed\n");
 		return;
 	}
 
 	printf_locked("Accepted new client!\n");
 
-	send(client_sock, "HELLO WORLD\n", strlen("HELLO WORLD\n"), 0);
-	recv(client_sock, &byte, 1, 0);
-	close(client_sock);
+	evinfo.fd = client_sock;
+	evinfo.events = FDEVENT_EVENT_POLLOUT;
+	evinfo.flags = FDEVENT_FLAG_ONESHOT;
+	evinfo.cb = on_writable;
+	evinfo.arg = NULL;
+
+	if (fdevent_register(&evinfo, &handle) != 0) {
+		printf_locked("Failed to register on_writable.\n");
+		close(client_sock);
+	}
+
+	fdevent_release_handle(handle);
 }
 
 int main()
@@ -109,7 +173,7 @@ int main()
 	evinfo.fd = sockfd;
 	evinfo.events = FDEVENT_EVENT_POLLIN;
 	evinfo.flags = FDEVENT_FLAG_NONE;
-	evinfo.cb = on_read;
+	evinfo.cb = on_connect;
 	evinfo.arg = NULL;
 
 	if (fdevent_register(&evinfo, &handle) != 0) {
