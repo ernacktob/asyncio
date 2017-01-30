@@ -2,13 +2,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <sys/errno.h>
 
 #include <unistd.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/resource.h>
 
 #include "fdevents.h"
+
+#define CONNECTIONS_PER_SECOND		5000
+#define MAX_CONCURRENT_CONNECTIONS	5000
+#define ACCEPT_LATENCY_MS		2
+#define BACKLOG_SIZE			((((CONNECTIONS_PER_SECOND) * (ACCEPT_LATENCY_MS)) / 1000) * 2)
 
 static void printf_locked(const char *fmt, ...)
 {
@@ -60,7 +67,7 @@ static int create_accept_sock(void)
 		return -1;
 	}
 
-	if (listen(accept_sock, 1) != 0) {
+	if (listen(accept_sock, BACKLOG_SIZE) != 0) {
 		perror("listen");
 		close(accept_sock);
 		return -1;
@@ -69,12 +76,15 @@ static int create_accept_sock(void)
 	return accept_sock;
 }
 
-static void on_readable(int fd, short revents, void *arg)
+static void on_readable(int fd, short revents, void *arg, fdevent_handle_t self_handle)
 {
 	char byte;
 	ssize_t rb;
+	(void)revents;
+	(void)arg;
+	(void)self_handle;
 
-	printf_locked("on_readable: revents = %hd, arg = %p\n", revents, arg);
+/*	printf_locked("on_readable: fd = %d, revents = %04hx, arg = %p\n", fd, revents, arg); */
 	rb = recv(fd, &byte, sizeof byte, 0);
 
 	if (rb < 0) {
@@ -84,22 +94,28 @@ static void on_readable(int fd, short revents, void *arg)
 	}
 
 	if (rb == 0) {
-		printf_locked("client closed connection.\n");
+/*		printf_locked("client closed connection.\n"); */
 		close(fd);
 		return;
 	}
 
-	printf_locked("Received byte: %c\n", byte);
+/*	printf_locked("Received byte: %c\n", byte); */
+	if (byte != 'a')
+		printf_locked("Did not receive correct byte.\n");
+
 	close(fd);
 }
 
-static void on_writable(int fd, short revents, void *arg)
+static void on_writable(int fd, short revents, void *arg, fdevent_handle_t self_handle)
 {
 	struct fdevent_info evinfo;
 	fdevent_handle_t handle;
 	ssize_t sb;
+	(void)revents;
+	(void)arg;
+	(void)self_handle;
 
-	printf_locked("on_writable: revents = %hd, arg = %p\n", revents, arg);
+/*	printf_locked("on_writable: fd = %d, revents = %04hx, arg = %p\n", fd, revents, arg); */
 	sb = send(fd, "HELLO WORLD\n", strlen("HELLO WORLD\n"), 0);
 
 	if (sb < 0) {
@@ -109,8 +125,8 @@ static void on_writable(int fd, short revents, void *arg)
 	}
 
 	evinfo.fd = fd;
-	evinfo.events = FDEVENT_EVENT_POLLIN;
-	evinfo.flags = FDEVENT_FLAG_ONESHOT;
+	evinfo.events = FDEVENT_EVENT_READ;
+	evinfo.flags = FDEVENT_FLAG_NONE;
 	evinfo.cb = on_readable;
 	evinfo.arg = NULL;
 
@@ -123,45 +139,81 @@ static void on_writable(int fd, short revents, void *arg)
 	fdevent_release_handle(handle);
 }
 
-static void on_connect(int fd, short revents, void *arg)
+#include <pthread.h>
+
+static unsigned int count = 0;
+static pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
+
+static void on_connect(int fd, short revents, void *arg, fdevent_handle_t self_handle)
 {
 	struct fdevent_info evinfo;
 	fdevent_handle_t handle;
 	int client_sock;
 	struct sockaddr dummy_addr;
 	socklen_t dummy_len;
+	(void)revents;
+	(void)arg;
 
 	dummy_len = sizeof dummy_addr;
-	printf_locked("on_connect: revents = %hd, arg = %p\n", revents, arg);
+/*	printf_locked("on_connect: fd = %d, revents = %04hx, arg = %p\n", fd, revents, arg); */
 
 	client_sock = accept(fd, &dummy_addr, &dummy_len);
 
-	if (client_sock < 0) {
-		printf_locked("accept failed\n");
+	while (client_sock > 0) {
+/*		printf_locked("Accepted new client!\n"); */
+
+		evinfo.fd = client_sock;
+		evinfo.events = FDEVENT_EVENT_WRITE;
+		evinfo.flags = FDEVENT_FLAG_NONE;
+		evinfo.cb = on_writable;
+		evinfo.arg = NULL;
+
+/*		printf("client_sock = %d\n", client_sock); */
+
+		if (fdevent_register(&evinfo, &handle) != 0) {
+			printf_locked("Failed to register on_writable.\n");
+			close(client_sock);
+		}
+
+		fdevent_release_handle(handle);
+
+		pthread_mutex_lock(&mtx);
+		++count;
+		pthread_mutex_unlock(&mtx);
+
+/*		printf_locked("count = %u\n", count); */
+		client_sock = accept(fd, &dummy_addr, &dummy_len);
+	}
+
+	if (errno != EWOULDBLOCK) {
+		printf_locked("error during accept.\n");
 		return;
 	}
 
-	printf_locked("Accepted new client!\n");
-
-	evinfo.fd = client_sock;
-	evinfo.events = FDEVENT_EVENT_POLLOUT;
-	evinfo.flags = FDEVENT_FLAG_ONESHOT;
-	evinfo.cb = on_writable;
-	evinfo.arg = NULL;
-
-	if (fdevent_register(&evinfo, &handle) != 0) {
-		printf_locked("Failed to register on_writable.\n");
-		close(client_sock);
+	if (fdevent_continue(self_handle) != 0) {
+		printf_locked("Failed to continue self.\n");
+		close(fd);
 	}
-
-	fdevent_release_handle(handle);
 }
 
 int main()
 {
+	struct rlimit rl;
 	struct fdevent_info evinfo;
 	fdevent_handle_t handle;
 	int sockfd;
+
+	if (getrlimit(RLIMIT_NOFILE, &rl) != 0) {
+		printf_locked("Failed to get rlimit for open files.\n");
+		exit(EXIT_FAILURE);
+	}
+
+	rl.rlim_cur = MAX_CONCURRENT_CONNECTIONS + 10;
+
+	if (setrlimit(RLIMIT_NOFILE, &rl) != 0) {
+		printf_locked("Failed to set rlimit for open files.\n");
+		exit(EXIT_FAILURE);
+	}
 
 	sockfd = create_accept_sock();
 
@@ -171,7 +223,7 @@ int main()
 	}
 
 	evinfo.fd = sockfd;
-	evinfo.events = FDEVENT_EVENT_POLLIN;
+	evinfo.events = FDEVENT_EVENT_READ;
 	evinfo.flags = FDEVENT_FLAG_NONE;
 	evinfo.cb = on_connect;
 	evinfo.arg = NULL;
@@ -193,6 +245,7 @@ int main()
 	if (fdevent_join(handle) != 0)
 		printf_locked("Failed to join.\n");
 
+	printf_locked("count = %u\n", count);
 	fdevent_release_handle(handle);
 	close(sockfd);
 	return 0;

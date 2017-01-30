@@ -69,7 +69,7 @@ static int create_accept_sock(void)
 	return accept_sock;
 }
 
-static void on_read(int fd, short revents, void *arg)
+static void on_read(int fd, short revents, void *arg, fdevent_handle_t self_handle)
 {
 	int client_sock;
 	struct sockaddr dummy_addr;
@@ -91,6 +91,11 @@ static void on_read(int fd, short revents, void *arg)
 	send(client_sock, "HELLO WORLD\n", strlen("HELLO WORLD\n"), 0);
 	recv(client_sock, &byte, 1, 0);
 	close(client_sock);
+
+	if (fdevent_continue(self_handle) != 0) {
+		printf_locked("Failed to continue self.\n");
+		close(fd);
+	}
 }
 
 int main()
@@ -107,7 +112,7 @@ int main()
 	}
 
 	evinfo.fd = sockfd;
-	evinfo.events = FDEVENT_EVENT_POLLIN;
+	evinfo.events = FDEVENT_EVENT_READ;
 	evinfo.flags = FDEVENT_FLAG_NONE;
 	evinfo.cb = on_read;
 	evinfo.arg = NULL;

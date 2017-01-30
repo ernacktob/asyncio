@@ -13,7 +13,7 @@
 #include "logging.h"
 #include "compile_time_assert.h"
 
-#define MAX_POLLFDS		1024
+#define MAX_POLLFDS		10000
 #define POLLFD_EVENT_NBITS	(CHAR_BIT * sizeof (short))
 
 /* STRUCT DEFINITIONS */
@@ -21,7 +21,6 @@ struct fdevent_handle {
 	int fd;
 	short events;
 	short revents;	/* Set by the fdevents_loop to received events */
-	short saved_events; /* Saved value of events while masking events to prevent double poll before processing */
 	uint32_t flags;
 	fdevent_callback callback_fn;
 	void *callback_arg;
@@ -91,7 +90,7 @@ static void remove_fdevents_locked(struct fdevents_worker_info *worker_info, str
 
 static void copy_fdevents_locked(const struct fdevents_worker_info *worker_info, struct pollfd *fds, nfds_t *nfdsp);
 static void clear_changed_fdevents_locked(struct fdevents_worker_info *worker_info);
-static void set_changed_fdevents_locked(struct fdevents_worker_info *worker_info);
+static int set_changed_fdevents_locked(struct fdevents_worker_info *worker_info);
 static int has_changed_fdevents_locked(struct fdevents_worker_info *worker_info);
 
 static int wake_fdevents_worker_locked(struct fdevents_worker_info *worker_info);
@@ -137,7 +136,6 @@ static int init_fdevent_handle(struct fdevent_handle *handle, const struct fdeve
 	handle->fd = evinfo->fd;
 	handle->events = to_poll_events(evinfo->events);
 	handle->revents = 0;
-	handle->saved_events = 0;
 	handle->flags = evinfo->flags;
 	handle->callback_fn = evinfo->cb;
 	handle->callback_arg = evinfo->arg;
@@ -524,9 +522,9 @@ static void remove_fdevents_locked(struct fdevents_worker_info *worker_info, str
 
 static void copy_fdevents_locked(const struct fdevents_worker_info *worker_info, struct pollfd *fds, nfds_t *nfdsp)
 {
-	size_t i;
+	nfds_t i;
 
-	for (i = 0; i < MAX_POLLFDS; i++)
+	for (i = 0; i < worker_info->nfds; i++)
 		fds[i] = worker_info->fds[i];
 
 	*nfdsp = worker_info->nfds;
@@ -537,9 +535,23 @@ static void clear_changed_fdevents_locked(struct fdevents_worker_info *worker_in
 	worker_info->changed = 0;
 }
 
-static void set_changed_fdevents_locked(struct fdevents_worker_info *worker_info)
+static int set_changed_fdevents_locked(struct fdevents_worker_info *worker_info)
 {
+	int wake;
+
+	if (!has_changed_fdevents_locked(worker_info))
+		wake = 1;
+	else
+		wake = 0;
+
 	worker_info->changed = 1;
+
+	if (wake) {
+		if (wake_fdevents_worker_locked(worker_info) != 0)
+			return -1;
+	}
+
+	return 0;
 }
 
 static int has_changed_fdevents_locked(struct fdevents_worker_info *worker_info)
@@ -600,16 +612,9 @@ static uint16_t to_fdevents_events(short poll_events)
 	uint16_t events;
 
 	events = 0;
-	SET_IF_SET(events, FDEVENT_EVENT_POLLERR, poll_events, POLLERR);
-	SET_IF_SET(events, FDEVENT_EVENT_POLLHUP, poll_events, POLLHUP);
-	SET_IF_SET(events, FDEVENT_EVENT_POLLIN, poll_events, POLLIN);
-	SET_IF_SET(events, FDEVENT_EVENT_POLLNVAL, poll_events, POLLNVAL);
-	SET_IF_SET(events, FDEVENT_EVENT_POLLOUT, poll_events, POLLOUT);
-	SET_IF_SET(events, FDEVENT_EVENT_POLLPRI, poll_events, POLLPRI);
-	SET_IF_SET(events, FDEVENT_EVENT_POLLRDBAND, poll_events, POLLRDBAND);
-	SET_IF_SET(events, FDEVENT_EVENT_POLLRDNORM, poll_events, POLLRDNORM);
-	SET_IF_SET(events, FDEVENT_EVENT_POLLWRBAND, poll_events, POLLWRBAND);
-	SET_IF_SET(events, FDEVENT_EVENT_POLLWRNORM, poll_events, POLLWRNORM);
+	SET_IF_SET(events, FDEVENT_EVENT_READ, poll_events, POLLIN | POLLRDBAND | POLLRDNORM | POLLPRI);
+	SET_IF_SET(events, FDEVENT_EVENT_WRITE, poll_events, POLLOUT | POLLWRBAND | POLLWRNORM);
+	SET_IF_SET(events, FDEVENT_EVENT_ERROR, poll_events, POLLERR | POLLHUP | POLLNVAL);
 
 	return events;
 }
@@ -619,16 +624,9 @@ static short to_poll_events(uint16_t events)
 	short poll_events;
 
 	poll_events = 0;
-	SET_IF_SET(poll_events, POLLERR, events, FDEVENT_EVENT_POLLERR);
-	SET_IF_SET(poll_events, POLLHUP, events, FDEVENT_EVENT_POLLHUP);
-	SET_IF_SET(poll_events, POLLIN, events, FDEVENT_EVENT_POLLIN);
-	SET_IF_SET(poll_events, POLLNVAL, events, FDEVENT_EVENT_POLLNVAL);
-	SET_IF_SET(poll_events, POLLOUT, events, FDEVENT_EVENT_POLLOUT);
-	SET_IF_SET(poll_events, POLLPRI, events, FDEVENT_EVENT_POLLPRI);
-	SET_IF_SET(poll_events, POLLRDBAND, events, FDEVENT_EVENT_POLLRDBAND);
-	SET_IF_SET(poll_events, POLLRDNORM, events, FDEVENT_EVENT_POLLRDNORM);
-	SET_IF_SET(poll_events, POLLWRBAND, events, FDEVENT_EVENT_POLLWRBAND);
-	SET_IF_SET(poll_events, POLLWRNORM, events, FDEVENT_EVENT_POLLWRNORM);
+	SET_IF_SET(poll_events, POLLIN | POLLRDBAND | POLLRDNORM | POLLPRI, events, FDEVENT_EVENT_READ);
+	SET_IF_SET(poll_events, POLLOUT | POLLWRBAND | POLLWRNORM, events, FDEVENT_EVENT_WRITE);
+	SET_IF_SET(poll_events, POLLERR | POLLHUP | POLLNVAL, events, FDEVENT_EVENT_ERROR);
 
 	return poll_events;
 }
@@ -640,22 +638,11 @@ static void fdevent_threadpool_completed(void *arg)
 	handle = (struct fdevent_handle *)arg;
 
 	if (lock_fdevents_worker_mutex() == 0) {
-		if (handle->flags & FDEVENT_FLAG_ONESHOT) {
-			if (handle->worker_info != NULL) {
-				remove_fdevents_locked(handle->worker_info, handle);
-				handle->worker_info = NULL;
-			}
-		} else {
-			handle->events = handle->saved_events; /* unmask for future polls */
-		}
-
 		handle->in_threadpool = 0;
 		unlock_fdevents_worker_mutex();
 	}
 
-	/* We will get re-called again, it's not finished if not ONESHOT */
-	if (handle->flags & FDEVENT_FLAG_ONESHOT)
-		notify_fdevent_handle_finished(handle);
+	notify_fdevent_handle_finished(handle);
 
 	/* Release threadpool's reference to handle */
 	fdevent_release_handle(handle);
@@ -668,20 +655,10 @@ static void fdevent_threadpool_cancelled(void *arg)
 	handle = (struct fdevent_handle *)arg;
 
 	if (lock_fdevents_worker_mutex() == 0) {
-		if (handle->flags & FDEVENT_FLAG_ONESHOT) {
-			if (handle->worker_info != NULL) {
-				remove_fdevents_locked(handle->worker_info, handle);
-				handle->worker_info = NULL;
-			}
-		} else {
-			handle->events = handle->saved_events; /* unmask for future polls */
-		}
-
 		handle->in_threadpool = 0;
 		unlock_fdevents_worker_mutex();
 	}
 
-	/* Cancelled -> finished even if not ONESHOT */
 	notify_fdevent_handle_finished(handle);
 
 	/* Release threadpool's reference to handle */
@@ -708,7 +685,7 @@ static void execute_fdevent_callback(void *arg)
 		set_cancelstate(CANCEL_DISABLE, &oldstate);
 
 	/* Execute the callback */
-	handle->callback_fn(handle->fd, to_fdevents_events(handle->revents), handle->callback_arg);
+	handle->callback_fn(handle->fd, to_fdevents_events(handle->revents), handle->callback_arg, handle);
 
 	restore_cancelstate(oldstate);
 	restore_canceltype(oldtype);
@@ -749,7 +726,6 @@ static void fdevents_loop(void *arg)
 
 		if (has_changed_fdevents_locked(worker_info)) {
 			copy_fdevents_locked(worker_info, fds, &nfds);
-			clear_changed_fdevents_locked(worker_info);
 
 			if (clearwake_fdevents_worker_locked(worker_info) != 0) {
 				ASYNCIO_ERROR("Failed to clear wake event.\n");
@@ -758,17 +734,18 @@ static void fdevents_loop(void *arg)
 				break;
 			}
 
+			clear_changed_fdevents_locked(worker_info);
 			unlock_fdevents_worker_mutex();
 			continue;
 		}
 
 		/* Scan for events */
 		for (i = 0; i < nfds; i++) {
-			if (fds[i].revents & fds[i].events) {
+			if (fds[i].revents & (fds[i].events | POLLERR | POLLHUP | POLLNVAL)) {
 				queue_foreach(&worker_info->callbacks[i], handle, next) {
 					next = handle->next; /* The handle might get removed and the next pointer overwritten otherwise */
 
-					if (fds[i].revents & handle->events) {
+					if (fds[i].revents & (handle->events | POLLERR | POLLHUP | POLLNVAL)) {
 						/* First pass (locked): just make a copy of the callback queues */
 						/* Second pass (unlocked): with the copies, actually process and dispatch threadpool, etc. */
 						/* Could use different links for next and prev in the copy, to avoid overwriting ->next and ->prev,
@@ -811,17 +788,16 @@ static void fdevents_loop(void *arg)
 						handle->threadpool_handle = threadpool_handle;
 						handle->in_threadpool = 1;
 
-						/* Mask events until they have been processed to avoid duplicates from poll() */
-						decrement_fdevent_refcount_locked(&worker_info->fdevent_refcounts[i], handle->events); /* XXX Will need lock on worker_info */
-						worker_info->fds[i].events = get_eventsmask_from_fdevent_refcount_locked(&worker_info->fdevent_refcounts[i]); /* XXX Same here */
-						increment_fdevent_refcount_locked(&worker_info->fdevent_refcounts[i], handle->events); /* We still want to count the saved_events */
-						handle->saved_events = handle->events;
-						handle->events = 0;
+						remove_fdevents_locked(worker_info, handle);
+						handle->worker_info = NULL;
 					}
 				}
 			}
 		}
 
+		/* The masked fds must be removed from the local fds array because poll
+		 * will return on exceptions even when events is 0. */
+		copy_fdevents_locked(worker_info, fds, &nfds);
 		unlock_fdevents_worker_mutex();
 	}
 }
@@ -875,7 +851,6 @@ static int dispatch_handle_to_loop(struct fdevent_handle *handle)
 	handle->worker_info = &fdevents_global_worker_info;
 
 	set_changed_fdevents_locked(&fdevents_global_worker_info);
-	wake_fdevents_worker_locked(&fdevents_global_worker_info);
 
 	unlock_fdevents_worker_mutex();
 	return 0;
@@ -926,6 +901,31 @@ int fdevent_register(struct fdevent_info *evinfo, fdevent_handle_t *fdhandle)
 	}
 
 	*fdhandle = handle;
+	restore_cancelstate(oldstate);
+	return 0;
+}
+
+int fdevent_continue(fdevent_handle_t fdhandle)
+{
+	struct fdevent_handle *handle;
+	int oldstate;
+
+	disable_cancellations(&oldstate);
+
+	handle = (struct fdevent_handle *)fdhandle;
+
+	/* Acquire reference for next worker dispatch. */
+	if (fdevent_acquire_handle(handle) != 0) {
+		restore_cancelstate(oldstate);
+		return -1;
+	}
+
+	if (dispatch_handle_to_loop(handle) != 0) {
+		fdevent_release_handle(handle);
+		restore_cancelstate(oldstate);
+		return -1;
+	}
+
 	restore_cancelstate(oldstate);
 	return 0;
 }
@@ -992,8 +992,10 @@ int fdevent_cancel(fdevent_handle_t fdhandle)
 		return -1;
 	}
 
-	if (handle->worker_info != NULL)
+	if (handle->worker_info != NULL) {
 		remove_fdevents_locked(handle->worker_info, handle);
+		set_changed_fdevents_locked(handle->worker_info);
+	}
 
 	unlock_fdevents_worker_mutex();
 
