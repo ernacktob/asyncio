@@ -1,0 +1,12 @@
+# Ignore all
+*
+
+# Unignore files
+!*.c
+!*.h
+!*.sh
+!*.py
+!.gitignore
+
+# Unignore all dirs
+!*/

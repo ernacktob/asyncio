@@ -1,7 +1,7 @@
 #ifndef HASHTABLE_H
 #define HASHTABLE_H
 
-#include <stdlib.h>
+#include <stddef.h>
 
 struct hashtable_entry {
 	size_t klen;

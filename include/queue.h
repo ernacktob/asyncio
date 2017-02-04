@@ -1,7 +1,7 @@
 #ifndef QUEUE_H
 #define QUEUE_H
 
-#include <stdlib.h>
+#include <stddef.h>
 
 #define decl_queue(type,name) \
 	struct {\
@@ -22,6 +22,9 @@
 
 #define queue_count(queue) \
 	((queue)->count)
+
+#define queue_first(queue) \
+	((queue)->first)
 
 #define queue_push(queue, node) \
 	do {\

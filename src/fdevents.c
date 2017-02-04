@@ -352,11 +352,6 @@ static int init_fdevents_worker(struct fdevents_worker_info *worker_info)
 	if (set_nonblocking(pipefds[0]) != 0 || set_nonblocking(pipefds[1]) != 0)
 		goto error_pipefds;
 
-	if (fcntl(pipefds[1], F_SETFL, fcntl(pipefds[1], F_GETFL) | O_NONBLOCK) == -1) {
-		ASYNCIO_SYSERROR("fcntl");
-		goto error_pipefds;
-	}
-
 	/* These are unused for the wake event */
 	queue_init(&worker_info->callbacks[0]);
 	init_fdevent_refcount_locked(&worker_info->fdevent_refcounts[0]);
@@ -715,6 +710,7 @@ static void fdevents_loop(void *arg)
 	for (;;) {
 		if (poll(fds, nfds, -1) < 0) {
 			ASYNCIO_SYSERROR("poll");
+			release_fdevents_worker(worker_info);
 			break;
 		}
 

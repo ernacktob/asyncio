@@ -13,7 +13,7 @@
 #define FDEVENT_FLAG_ASYNCCANCEL	(1 << 2)
 
 typedef void *fdevent_handle_t;
-typedef void (*fdevent_callback)(int fd, short revents, void *arg, fdevent_handle_t self_handle);
+typedef void (*fdevent_callback)(int fd, uint16_t revents, void *arg, fdevent_handle_t self_handle);
 
 struct fdevent_info {
 	int fd;
