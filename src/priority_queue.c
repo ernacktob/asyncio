@@ -5,6 +5,31 @@
 #include "safe_malloc.h"
 
 #define UINT64T_MAX		((uint64_t)(-1)) /* Get rid of compiler warning about 'use of C99 long long integer constant' for UINT64_MAX */
+#define SIZET_MAX		((size_t)(-1)) /* Get rid of compiler warning about 'use of C99 long long integer constant' for SIZE_MAX */
+
+/* PROTOTYPES */
+static void fix_tree_branch(struct priority_queue *queue, struct prefix_tree_node **nodep);
+/* END PROTOTYPES */
+
+static void fix_tree_branch(struct priority_queue *queue, struct prefix_tree_node **nodep)
+{
+	if ((*nodep)->next_0 == NULL && (*nodep)->next_1 == NULL) {
+		(*nodep)->memory_next = queue->first;
+		queue->first = *nodep;
+		*nodep = NULL;
+		return;
+	}
+
+	if ((*nodep)->next_0 == NULL) {
+		(*nodep)->priority = (*nodep)->next_1->priority;
+		(*nodep)->data = (*nodep)->next_1->data;
+		fix_tree_branch(queue, &((*nodep)->next_1));
+	} else {
+		(*nodep)->priority = (*nodep)->next_0->priority;
+		(*nodep)->data = (*nodep)->next_0->data;
+		fix_tree_branch(queue, &((*nodep)->next_0));
+	}
+}
 
 int priority_queue_init(struct priority_queue *queue, size_t maxentries)
 {
@@ -14,7 +39,10 @@ int priority_queue_init(struct priority_queue *queue, size_t maxentries)
 	if (maxentries == 0)
 		return -1;
 
-	/* XXX Overflow during multiplication? */
+	/* Check for overflow during multiplication */
+	if (maxentries > SIZET_MAX / sizeof *entries)
+		return -1;
+
 	entries = safe_malloc(maxentries * sizeof *entries);
 
 	if (entries == NULL)
@@ -53,15 +81,18 @@ int priority_queue_insert(struct priority_queue *queue, uint64_t priority, const
 
 		--i;
 
-		if (priority & (1 << i))
+		if (priority & (((uint64_t)1) << i)) {
 			nodep = &((*nodep)->next_1);
-		else
+		}
+		else {
 			nodep = &((*nodep)->next_0);
+		}
 	}
 
 	/* Get memory for a prefix_tree_node */
 	node = queue->first;
 	queue->first = node->memory_next;
+	++(queue->nentries);
 
 	node->priority = priority;
 	node->data = data;
@@ -88,7 +119,7 @@ int priority_queue_modify(struct priority_queue *queue, uint64_t priority, const
 
 		--i;
 
-		if (priority & (1 << i))
+		if (priority & (((uint64_t)1) << i))
 			nodep = &((*nodep)->next_1);
 		else
 			nodep = &((*nodep)->next_0);
@@ -113,7 +144,7 @@ int priority_queue_lookup(struct priority_queue *queue, uint64_t priority, const
 
 		--i;
 
-		if (priority & (1 << i))
+		if (priority & (((uint64_t)1) << i))
 			nodep = &((*nodep)->next_1);
 		else
 			nodep = &((*nodep)->next_0);
@@ -172,9 +203,9 @@ int priority_queue_pop(struct priority_queue *queue, const void **datap)
 	}
 
 	*datap = (*min_nodep)->data;
-	(*min_nodep)->memory_next = queue->first;
-	queue->first = *min_nodep;
-	*min_nodep = NULL;
+	fix_tree_branch(queue, min_nodep);
+	--(queue->nentries);
+
 	return 0;
 }
 
@@ -188,15 +219,14 @@ void priority_queue_delete(struct priority_queue *queue, uint64_t priority)
 
 	while (*nodep != NULL) {
 		if ((*nodep)->priority == priority) {
-			(*nodep)->memory_next = queue->first;
-			queue->first = *nodep;
-			*nodep = NULL;
+			fix_tree_branch(queue, nodep);
+			--(queue->nentries);
 			return;
 		}
 
 		--i;
 
-		if (priority & (1 << i))
+		if (priority & (((uint64_t)1) << i))
 			nodep = &((*nodep)->next_1);
 		else
 			nodep = &((*nodep)->next_0);

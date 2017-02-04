@@ -4,6 +4,8 @@
 #include "hashtable.h"
 #include "safe_malloc.h"
 
+#define SIZET_MAX		((size_t)(-1)) /* Get rid of compiler warning about 'use of C99 long long integer constant' for SIZE_MAX */
+
 /* PROTOTYPES */
 static unsigned long djb2_hash(const unsigned char *data, size_t len);
 static size_t findbucket(const void *key, size_t klen, size_t nbuckets);
@@ -39,6 +41,13 @@ int hashtable_init(struct hashtable *table, size_t maxentries)
 	size_t i;
 
 	if (maxentries == 0)
+		return -1;
+
+	/* Check for overflows during multiplication */
+	if (maxentries > SIZET_MAX / sizeof *buckets)
+		return -1;
+
+	if (maxentries > SIZET_MAX / sizeof *entries)
 		return -1;
 
 	nbuckets = maxentries;
