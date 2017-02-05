@@ -1,3 +1,5 @@
 # asyncio
-Simple C library for multithreading and eventloop.
-This is currently a work in progress...
+Simple C library for asynchronous computation and event processing.
+
+To build, simply type the command:
+$ ./build.sh
