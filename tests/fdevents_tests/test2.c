@@ -76,15 +76,14 @@ static int create_accept_sock(void)
 	return accept_sock;
 }
 
-static void on_readable(int fd, short revents, void *arg, fdevent_handle_t self_handle)
+static void on_readable(int fd, uint16_t revents, void *arg, int *continued)
 {
 	char byte;
 	ssize_t rb;
 	(void)revents;
 	(void)arg;
-	(void)self_handle;
+	(void)continued;
 
-/*	printf_locked("on_readable: fd = %d, revents = %04hx, arg = %p\n", fd, revents, arg); */
 	rb = recv(fd, &byte, sizeof byte, 0);
 
 	if (rb < 0) {
@@ -94,28 +93,25 @@ static void on_readable(int fd, short revents, void *arg, fdevent_handle_t self_
 	}
 
 	if (rb == 0) {
-/*		printf_locked("client closed connection.\n"); */
 		close(fd);
 		return;
 	}
 
-/*	printf_locked("Received byte: %c\n", byte); */
 	if (byte != 'a')
 		printf_locked("Did not receive correct byte.\n");
 
 	close(fd);
 }
 
-static void on_writable(int fd, short revents, void *arg, fdevent_handle_t self_handle)
+static void on_writable(int fd, uint16_t revents, void *arg, int *continued)
 {
 	struct fdevent_info evinfo;
 	fdevent_handle_t handle;
 	ssize_t sb;
 	(void)revents;
 	(void)arg;
-	(void)self_handle;
+	(void)continued;
 
-/*	printf_locked("on_writable: fd = %d, revents = %04hx, arg = %p\n", fd, revents, arg); */
 	sb = send(fd, "HELLO WORLD\n", strlen("HELLO WORLD\n"), 0);
 
 	if (sb < 0) {
@@ -144,7 +140,7 @@ static void on_writable(int fd, short revents, void *arg, fdevent_handle_t self_
 static unsigned int count = 0;
 static pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
 
-static void on_connect(int fd, short revents, void *arg, fdevent_handle_t self_handle)
+static void on_connect(int fd, uint16_t revents, void *arg, int *continued)
 {
 	struct fdevent_info evinfo;
 	fdevent_handle_t handle;
@@ -155,20 +151,15 @@ static void on_connect(int fd, short revents, void *arg, fdevent_handle_t self_h
 	(void)arg;
 
 	dummy_len = sizeof dummy_addr;
-/*	printf_locked("on_connect: fd = %d, revents = %04hx, arg = %p\n", fd, revents, arg); */
 
 	client_sock = accept(fd, &dummy_addr, &dummy_len);
 
 	while (client_sock > 0) {
-/*		printf_locked("Accepted new client!\n"); */
-
 		evinfo.fd = client_sock;
 		evinfo.events = FDEVENT_EVENT_WRITE;
 		evinfo.flags = FDEVENT_FLAG_NONE;
 		evinfo.cb = on_writable;
 		evinfo.arg = NULL;
-
-/*		printf("client_sock = %d\n", client_sock); */
 
 		if (fdevent_register(&evinfo, &handle) != 0) {
 			printf_locked("Failed to register on_writable.\n");
@@ -181,7 +172,6 @@ static void on_connect(int fd, short revents, void *arg, fdevent_handle_t self_h
 		++count;
 		pthread_mutex_unlock(&mtx);
 
-/*		printf_locked("count = %u\n", count); */
 		client_sock = accept(fd, &dummy_addr, &dummy_len);
 	}
 
@@ -190,10 +180,7 @@ static void on_connect(int fd, short revents, void *arg, fdevent_handle_t self_h
 		return;
 	}
 
-	if (fdevent_continue(self_handle) != 0) {
-		printf_locked("Failed to continue self.\n");
-		close(fd);
-	}
+	fdevent_continue(continued);
 }
 
 int main()

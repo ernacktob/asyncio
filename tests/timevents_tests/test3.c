@@ -29,14 +29,9 @@ int main()
 	printf("Sleeping for 10s...\n");
 	usleep(10000000);
 
-	printf("Cancelling...\n");
-
-	if (timevent_cancel(handle) != 0) {
-		printf("Failed to cancel timevent.\n");
-		return -1;
-	}
-
 	printf("Joining...\n");
+
+	/* This should never return, because it continues itself and no cancel. */
 	if (timevent_join(handle) != 0) {
 		printf("Failed to join timevent.\n");
 		return -1;

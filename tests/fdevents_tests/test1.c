@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdarg.h>
 
@@ -69,7 +70,7 @@ static int create_accept_sock(void)
 	return accept_sock;
 }
 
-static void on_read(int fd, short revents, void *arg, fdevent_handle_t self_handle)
+static void on_read(int fd, uint16_t revents, void *arg, int *continued)
 {
 	int client_sock;
 	struct sockaddr dummy_addr;
@@ -92,10 +93,7 @@ static void on_read(int fd, short revents, void *arg, fdevent_handle_t self_hand
 	recv(client_sock, &byte, 1, 0);
 	close(client_sock);
 
-	if (fdevent_continue(self_handle) != 0) {
-		printf_locked("Failed to continue self.\n");
-		close(fd);
-	}
+	fdevent_continue(continued);
 }
 
 int main()

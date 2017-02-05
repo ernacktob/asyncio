@@ -100,7 +100,6 @@ static uint32_t get_threadpool_flags(uint32_t fdevents_flags);
 static uint16_t to_fdevents_events(short poll_events);
 static short to_poll_events(uint16_t events);
 
-static void fdevent_threadpool_completed(void *arg);
 static void fdevent_threadpool_cancelled(void *arg);
 static void execute_fdevent_callback(void *arg);
 
@@ -626,24 +625,6 @@ static short to_poll_events(uint16_t events)
 	return poll_events;
 }
 
-static void fdevent_threadpool_completed(void *arg)
-{
-	struct fdevent_handle *handle;
-
-	handle = (struct fdevent_handle *)arg;
-
-	if (lock_fdevents_worker_mutex() == 0) {
-		handle->in_threadpool = 0;
-		unlock_fdevents_worker_mutex();
-	}
-
-	/* XXX Check if handle->continue, dont notify if set */
-	notify_fdevent_handle_finished(handle);
-
-	/* Release threadpool's reference to handle */
-	fdevent_release_handle(handle);
-}
-
 static void fdevent_threadpool_cancelled(void *arg)
 {
 	struct fdevent_handle *handle;
@@ -655,6 +636,7 @@ static void fdevent_threadpool_cancelled(void *arg)
 		unlock_fdevents_worker_mutex();
 	}
 
+	/* If cancelled we don't care if continued was set */
 	notify_fdevent_handle_finished(handle);
 
 	/* Release threadpool's reference to handle */
@@ -664,9 +646,11 @@ static void fdevent_threadpool_cancelled(void *arg)
 static void execute_fdevent_callback(void *arg)
 {
 	struct fdevent_handle *handle;
+	int continued;
 	int oldstate;
 	int oldtype;
 
+	continued = 0;
 	handle = (struct fdevent_handle *)arg;
 
 	/* Set user-defined cancellation settings */
@@ -681,10 +665,32 @@ static void execute_fdevent_callback(void *arg)
 		set_cancelstate(CANCEL_DISABLE, &oldstate);
 
 	/* Execute the callback */
-	handle->callback_fn(handle->fd, to_fdevents_events(handle->revents), handle->callback_arg, handle);
+	handle->callback_fn(handle->fd, to_fdevents_events(handle->revents), handle->callback_arg, &continued);
 
 	restore_cancelstate(oldstate);
 	restore_canceltype(oldtype);
+
+	if (lock_fdevents_worker_mutex() == 0) {
+		handle->in_threadpool = 0;
+		unlock_fdevents_worker_mutex();
+	}
+
+	if (continued) {
+		/* Acquire reference for next worker dispatch. */
+		if (fdevent_acquire_handle(handle) == 0) {
+			if (dispatch_handle_to_loop(handle) != 0) {
+				ASYNCIO_ERROR("Failed to redispatch handle for continue.\n");
+				fdevent_release_handle(handle);
+			}
+		} else {
+			ASYNCIO_ERROR("Failed to acquire handle for continue.\n");
+		}
+	} else {
+		notify_fdevent_handle_finished(handle);
+	}
+
+	/* Release threadpool's reference to handle */
+	fdevent_release_handle(handle);
 }
 
 static void fdevents_loop(void *arg)
@@ -770,8 +776,8 @@ static void fdevents_loop(void *arg)
 						threadpool_info.flags = get_threadpool_flags(handle->flags);
 						threadpool_info.dispatch_info.fn = execute_fdevent_callback;
 						threadpool_info.dispatch_info.arg = handle;
-						threadpool_info.completed_info.cb = fdevent_threadpool_completed;
-						threadpool_info.completed_info.arg = handle;
+						threadpool_info.completed_info.cb = NULL;
+						threadpool_info.completed_info.arg = NULL;
 						threadpool_info.cancelled_info.cb = fdevent_threadpool_cancelled;
 						threadpool_info.cancelled_info.arg = handle;
 
@@ -898,31 +904,6 @@ int fdevent_register(struct fdevent_info *evinfo, fdevent_handle_t *fdhandle)
 	}
 
 	*fdhandle = handle;
-	restore_cancelstate(oldstate);
-	return 0;
-}
-
-int fdevent_continue(fdevent_handle_t fdhandle)
-{
-	struct fdevent_handle *handle;
-	int oldstate;
-
-	disable_cancellations(&oldstate);
-
-	handle = (struct fdevent_handle *)fdhandle;
-
-	/* Acquire reference for next worker dispatch. */
-	if (fdevent_acquire_handle(handle) != 0) {
-		restore_cancelstate(oldstate);
-		return -1;
-	}
-
-	if (dispatch_handle_to_loop(handle) != 0) {
-		fdevent_release_handle(handle);
-		restore_cancelstate(oldstate);
-		return -1;
-	}
-
 	restore_cancelstate(oldstate);
 	return 0;
 }

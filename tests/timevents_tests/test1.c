@@ -56,11 +56,11 @@ static int get_timestamp(uint64_t *timestamp)
 	return 0;
 }
 
-static void increment_counter(void *arg, timevent_handle_t self_handle)
+static void increment_counter(void *arg, int *continued)
 {
 	struct timer_arg *timer;
 	uint64_t now;
-	(void)self_handle;
+	(void)continued;
 
 	if (get_timestamp(&now) != 0)
 		return;

@@ -88,7 +88,6 @@ static int convert_to_deadline(int timeout, uint64_t *deadlinep);
 static int convert_to_timeout(uint64_t deadline, int *timeoutp);
 static int calculate_timeout_locked(struct timevents_worker_info *worker_info, int *timeoutp);
 
-static void timevent_threadpool_completed(void *arg);
 static void timevent_threadpool_cancelled(void *arg);
 static void execute_timevent_callback(void *arg);
 
@@ -528,23 +527,6 @@ static int calculate_timeout_locked(struct timevents_worker_info *worker_info, i
 	return 0;
 }
 
-static void timevent_threadpool_completed(void *arg)
-{
-	struct timevent_handle *handle;
-
-	handle = (struct timevent_handle *)arg;
-
-	if (lock_timevents_worker_mutex() == 0) {
-		handle->in_threadpool = 0;
-		unlock_timevents_worker_mutex();
-	}
-
-	notify_timevent_handle_finished(handle);
-
-	/* Release threadpool's reference to handle */
-	timevent_release_handle(handle);
-}
-
 static void timevent_threadpool_cancelled(void *arg)
 {
 	struct timevent_handle *handle;
@@ -565,9 +547,12 @@ static void timevent_threadpool_cancelled(void *arg)
 static void execute_timevent_callback(void *arg)
 {
 	struct timevent_handle *handle;
+	uint64_t deadline;
+	int continued;
 	int oldstate;
 	int oldtype;
 
+	continued = 0;
 	handle = (struct timevent_handle *)arg;
 
 	/* Set user-defined cancellation settings */
@@ -582,10 +567,40 @@ static void execute_timevent_callback(void *arg)
 		set_cancelstate(CANCEL_DISABLE, &oldstate);
 
 	/* Execute the callback */
-	handle->callback_fn(handle->callback_arg, handle);
+	handle->callback_fn(handle->callback_arg, &continued);
 
 	restore_cancelstate(oldstate);
 	restore_canceltype(oldtype);
+
+	if (lock_timevents_worker_mutex() == 0) {
+		handle->in_threadpool = 0;
+		unlock_timevents_worker_mutex();
+	}
+
+	if (continued) {
+		/* Acquire reference for next worker dispatch. */
+		if (timevent_acquire_handle(handle) == 0) {
+			/* Recalculate deadline from timeout */
+			if (convert_to_deadline(handle->timeout, &deadline) == 0) {
+				handle->deadline = deadline;
+
+				if (dispatch_handle_to_loop(handle) != 0) {
+					ASYNCIO_ERROR("Failed to redispatch handle for continue.\n");
+					timevent_release_handle(handle);
+				}
+			} else {
+				ASYNCIO_ERROR("Failed to convert to deadline for continue.\n");
+				timevent_release_handle(handle);
+			}
+		} else {
+			ASYNCIO_ERROR("Failed to acquire handle for continue.\n");
+		}
+	} else {
+		notify_timevent_handle_finished(handle);
+	}
+
+	/* Release threadpool's reference to handle */
+	timevent_release_handle(handle);
 }
 
 static void timevents_loop(void *arg)
@@ -655,8 +670,8 @@ static void timevents_loop(void *arg)
 				threadpool_info.flags = get_threadpool_flags(handle->flags);
 				threadpool_info.dispatch_info.fn = execute_timevent_callback;
 				threadpool_info.dispatch_info.arg = handle;
-				threadpool_info.completed_info.cb = timevent_threadpool_completed;
-				threadpool_info.completed_info.arg = handle;
+				threadpool_info.completed_info.cb = NULL;
+				threadpool_info.completed_info.arg = NULL;
 				threadpool_info.cancelled_info.cb = timevent_threadpool_cancelled;
 				threadpool_info.cancelled_info.arg = handle;
 
@@ -778,40 +793,6 @@ int timevent_register(struct timevent_info *timinfo, timevent_handle_t *timhandl
 	}
 
 	*timhandle = handle;
-	restore_cancelstate(oldstate);
-	return 0;
-}
-
-int timevent_continue(timevent_handle_t timhandle)
-{
-	struct timevent_handle *handle;
-	int oldstate;
-	uint64_t deadline;
-
-	disable_cancellations(&oldstate);
-
-	handle = (struct timevent_handle *)timhandle;
-
-	/* Recalculate deadline from timeout */
-	if (convert_to_deadline(handle->timeout, &deadline) != 0) {
-		restore_cancelstate(oldstate);
-		return -1;
-	}
-
-	handle->deadline = deadline;
-
-	/* Acquire reference for next worker dispatch. */
-	if (timevent_acquire_handle(handle) != 0) {
-		restore_cancelstate(oldstate);
-		return -1;
-	}
-
-	if (dispatch_handle_to_loop(handle) != 0) {
-		timevent_release_handle(handle);
-		restore_cancelstate(oldstate);
-		return -1;
-	}
-
 	restore_cancelstate(oldstate);
 	return 0;
 }

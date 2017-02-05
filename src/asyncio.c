@@ -280,46 +280,6 @@ int asyncio_timevent(asyncio_time_t timeout, asyncio_timevent_cb cb, void *arg, 
 	return 0;
 }
 
-int asyncio_continue(asyncio_handle_t ahandle)
-{
-	struct asyncio_handle *handle;
-	int oldstate;
-
-	disable_cancellations(&oldstate);
-
-	handle = (struct asyncio_handle *)ahandle;
-
-	if (handle->type != ASYNCIO_TYPE_FDEVENT) {
-		restore_cancelstate(oldstate);
-		return -1;
-	}
-
-	switch (handle->type) {
-		case ASYNCIO_TYPE_FDEVENT:
-			if (fdevent_continue(handle->union_handle.fdhandle) != 0) {
-				restore_cancelstate(oldstate);
-				return -1;
-			}
-
-			break;
-
-		case ASYNCIO_TYPE_TIMEVENT:
-			if (timevent_continue(handle->union_handle.timhandle) != 0) {
-				restore_cancelstate(oldstate);
-				return -1;
-			}
-
-			break;
-
-		default:
-			restore_cancelstate(oldstate);
-			return -1;
-	}
-
-	restore_cancelstate(oldstate);
-	return 0;
-}
-
 int asyncio_join(asyncio_handle_t ahandle)
 {
 	struct asyncio_handle *handle;
