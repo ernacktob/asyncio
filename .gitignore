@@ -7,6 +7,11 @@
 !*.sh
 !*.py
 !.gitignore
+!Makefile
 
 # Unignore all dirs
 !*/
+
+# Ignore tests/obj and tests/include
+tests/obj
+tests/include

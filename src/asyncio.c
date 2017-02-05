@@ -205,6 +205,7 @@ static void cleanup_asyncio_handle(struct asyncio_handle *handle)
 	}
 }
 
+__attribute__((visibility("default")))
 int asyncio_dispatch(asyncio_dispatch_fn fn, void *arg, asyncio_flag_t flags, asyncio_handle_t *ahandle)
 {
 	struct asyncio_handle *handle;
@@ -230,6 +231,7 @@ int asyncio_dispatch(asyncio_dispatch_fn fn, void *arg, asyncio_flag_t flags, as
 	return 0;
 }
 
+__attribute__((visibility("default")))
 int asyncio_fdevent(int fd, asyncio_fdevent_t events, asyncio_fdevent_cb cb, void *arg, asyncio_flag_t flags, asyncio_handle_t *ahandle)
 {
 	struct asyncio_handle *handle;
@@ -255,6 +257,7 @@ int asyncio_fdevent(int fd, asyncio_fdevent_t events, asyncio_fdevent_cb cb, voi
 	return 0;
 }
 
+__attribute__((visibility("default")))
 int asyncio_timevent(asyncio_time_t timeout, asyncio_timevent_cb cb, void *arg, asyncio_flag_t flags, asyncio_handle_t *ahandle)
 {
 	struct asyncio_handle *handle;
@@ -280,6 +283,7 @@ int asyncio_timevent(asyncio_time_t timeout, asyncio_timevent_cb cb, void *arg, 
 	return 0;
 }
 
+__attribute__((visibility("default")))
 int asyncio_join(asyncio_handle_t ahandle)
 {
 	struct asyncio_handle *handle;
@@ -311,6 +315,7 @@ int asyncio_join(asyncio_handle_t ahandle)
 	return rc;
 }
 
+__attribute__((visibility("default")))
 int asyncio_cancel(asyncio_handle_t ahandle)
 {
 	struct asyncio_handle *handle;
@@ -342,6 +347,7 @@ int asyncio_cancel(asyncio_handle_t ahandle)
 	return rc;
 }
 
+__attribute__((visibility("default")))
 int asyncio_acquire(asyncio_handle_t ahandle)
 {
 	struct asyncio_handle *handle;
@@ -370,6 +376,7 @@ int asyncio_acquire(asyncio_handle_t ahandle)
 	return rc;
 }
 
+__attribute__((visibility("default")))
 void asyncio_release(asyncio_handle_t ahandle)
 {
 	struct asyncio_handle *handle;
