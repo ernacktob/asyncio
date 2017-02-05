@@ -3,15 +3,16 @@ UNAME = $(shell uname)
 ifeq ($(UNAME), Darwin)
 LDFLAGS = -dylib -macosx_version_min 10.8
 TARGET = libasyncio.dylib
+LIBS = -lpthread
 else
 LDFLAGS = -shared
 TARGET = libasyncio.so
+LIBS = -lpthread -lrt
 endif
 
 IDIR = include
 SRCDIR = src
 ODIR = obj
-LIBS = -lpthread
 CC = gcc
 CFLAGS = -Wall -Wextra -Werror -pedantic -fPIC -fvisibility=hidden
 LD = ld
