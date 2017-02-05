@@ -49,7 +49,7 @@ static int create_accept_sock(void)
 		return -1;
 	}
 
-	my_addr.sin_len = sizeof my_addr;
+/*	my_addr.sin_len = sizeof my_addr; */
 	my_addr.sin_family = AF_INET;
 	my_addr.sin_port = htons(12345);
 
