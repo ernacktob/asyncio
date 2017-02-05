@@ -69,8 +69,6 @@ static int init_threadpool_handle(struct threadpool_handle *handle, struct threa
 static void cleanup_threadpool_handle(struct threadpool_handle *handle);
 
 static void init_worker_info(struct worker_thread_info *info);
-static void cleanup_worker_info(struct worker_thread_info *info);
-static void cleanup_threadpool(void);
 /* END PROTOTYPES */
 
 /* GLOBALS */
@@ -566,46 +564,6 @@ static void init_worker_info(struct worker_thread_info *info)
 	ASYNCIO_DEBUG_RETURN(VOIDRET);;
 }
 
-static void cleanup_worker_info(struct worker_thread_info *info)
-{
-	int rc;
-
-	ASYNCIO_DEBUG_ENTER(1 ARG("%p", info));
-	info->initialized = 0;
-
-	if (info->running) {
-		info->running = 0;
-
-		/* For some reason pthread_kill returns errno 'no such process', maybe because threads have
-		 * been killed already after exiting main? */
-		ASYNCIO_DEBUG_CALL(3 FUNC(pthread_kill) ARG("%016llx", info->thread) ARG("%d", SIGINT));
-		if (pthread_kill(info->thread, SIGINT) == 0) {
-			ASYNCIO_DEBUG_CALL(3 FUNC(pthread_join) ARG("join: %016llx", info->thread) ARG("%p", NULL));
-			if ((rc = pthread_join(info->thread, NULL)) != 0) {
-				errno = rc;
-				ASYNCIO_SYSERROR("pthread_join");
-			}
-		}
-	}
-
-	ASYNCIO_DEBUG_RETURN(VOIDRET);
-}
-
-/* Register atexit */
-static void cleanup_threadpool(void)
-{
-	size_t i;
-
-	ASYNCIO_DEBUG_ENTER(VOIDARG);
-
-	workers_initialized = 0;
-
-	for (i = 0; i < MAX_WORKER_THREADS; i++)
-		cleanup_worker_info(&worker_threads[i]);
-
-	ASYNCIO_DEBUG_RETURN(VOIDRET);
-}
-
 static int dispatch_contractor(struct threadpool_handle *handle)
 {
 	pthread_t thread;
@@ -681,11 +639,6 @@ static int dispatch_worker(struct threadpool_handle *handle)
 			init_worker_info(&worker_threads[i]);
 
 		queue_init(&workers_task_queue);
-
-		ASYNCIO_DEBUG_CALL(2 FUNC(atexit) ARG("%p", cleanup_threadpool));
-		if (atexit(cleanup_threadpool) != 0)
-			ASYNCIO_SYSERROR("atexit");
-
 		workers_initialized = 1;
 	}
 
