@@ -1,8 +1,8 @@
 UNAME = $(shell uname)
 
 ifeq ($(UNAME), Darwin)
-LDFLAGS = -dylib -macosx_version_min 10.8
 TARGET = libasyncio.dylib
+LDFLAGS = -dylib -macosx_version_min 10.8 -install_name $(shell pwd)/$(TARGET)
 LIBS = -lpthread
 else
 LDFLAGS = -shared
@@ -19,7 +19,7 @@ CC = gcc
 CFLAGS = -Wall -Wextra -Werror -pedantic -fPIC -fvisibility=hidden
 LD = ld
 
-.PHONY: default all objdir public_header tests clean
+.PHONY: default all objdir public_header tests examples clean
 
 default: $(TARGET)
 all: default
@@ -40,6 +40,9 @@ $(TARGET): objdir public_header $(OBJECTS)
 
 tests:
 	$(MAKE) -C tests
+
+examples: $(TARGET)
+	$(MAKE) -C examples
 
 clean:
 	rm -f $(TARGET)
