@@ -10,6 +10,8 @@ TARGET = libasyncio.so
 LIBS = -lpthread -lrt
 endif
 
+export LIBS
+
 IDIR = include
 SRCDIR = src
 ODIR = obj
