@@ -853,18 +853,24 @@ int threadpool_cancel(threadpool_handle_t thandle)
 		} else {
 			ASYNCIO_DEBUG_CALL(2 FUNC(pthread_cancel) ARG("%016llx", handle->thread));
 			if ((rc = pthread_cancel(handle->thread)) != 0) {
-				errno = rc;
-				ASYNCIO_SYSERROR("pthread_cancel");
-
-				ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &worker_threads_mtx));
-				if ((rc = pthread_mutex_unlock(&worker_threads_mtx)) != 0) {
+				/* Some implementations return ESRCH if pthread_cancel is called
+				 * on a thread that has already terminated normally by returning
+				 * from the pthread_create callback function. This is not an error,
+				 * just ignore it. */
+				if (rc != ESRCH) {
 					errno = rc;
-					ASYNCIO_SYSERROR("pthread_mutex_unlock");
-				}
+					ASYNCIO_SYSERROR("pthread_cancel");
 
-				restore_cancelstate(oldstate);
-				ASYNCIO_DEBUG_RETURN(RET("%d", -1));
-				return -1;
+					ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &worker_threads_mtx));
+					if ((rc = pthread_mutex_unlock(&worker_threads_mtx)) != 0) {
+						errno = rc;
+						ASYNCIO_SYSERROR("pthread_mutex_unlock");
+					}
+
+					restore_cancelstate(oldstate);
+					ASYNCIO_DEBUG_RETURN(RET("%d", -1));
+					return -1;
+				}
 			}
 		}
 
