@@ -89,13 +89,15 @@ int main()
 
 	for (i = 0; i < MAXENTRIES; i++) {
 		if (in_queue[i]) {
-			assert(priority_queue_peek(&queue, &prio) == 0);
+			assert(priority_queue_peek(&queue, &prio, (void *)&valuep) == 0);
 			assert(prio == entries[i].priority);
-			assert(priority_queue_pop(&queue, (void *)&valuep) == 0);
+			assert(*valuep == *(entries[i].valuep));
+			assert(priority_queue_pop(&queue, &prio, (void *)&valuep) == 0);
+			assert(prio == entries[i].priority);
 			assert(*valuep == *(entries[i].valuep));
 			in_queue[i] = 0;
 		} else {
-			assert(priority_queue_peek(&queue, &prio) == -1);
+			assert(priority_queue_peek(&queue, &prio, (void *)&valuep) == -1);
 		}
 	}
 

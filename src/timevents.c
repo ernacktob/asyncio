@@ -6,6 +6,8 @@
 #include <fcntl.h>
 #include <time.h>
 
+#include <stdio.h>
+
 #include "timevents.h"
 #include "threadpool.h"
 #include "cancellations.h"
@@ -22,6 +24,7 @@
 
 /* STRUCT DEFINITIONS */
 struct timevent_handle {
+	int timeout;
 	uint64_t deadline;
 	uint32_t flags;
 	timevent_callback callback_fn;
@@ -127,6 +130,7 @@ static int init_timevent_handle(struct timevent_handle *handle, const struct tim
 		goto error;
 	}
 
+	handle->timeout = evinfo->timeout;
 	handle->deadline = deadline;
 	handle->flags = evinfo->flags;
 	handle->callback_fn = evinfo->cb;
@@ -402,8 +406,12 @@ static void remove_timevents_locked(struct timevents_worker_info *worker_info, s
 
 	if (queue_empty(cbqueue)) {
 		priority_queue_delete(&worker_info->deadlines, handle->deadline);
-		worker_info->callbacks[index] = worker_info->callbacks[last];
-		priority_queue_modify(&worker_info->deadlines, queue_first(&worker_info->callbacks[last])->deadline, cbqueue); /* This can't fail */
+
+		if (index != last) {
+			worker_info->callbacks[index] = worker_info->callbacks[last];
+			priority_queue_modify(&worker_info->deadlines, queue_first(&worker_info->callbacks[last])->deadline, cbqueue); /* This can't fail */
+		}
+
 		--worker_info->ndeadlines;
 	}
 }
@@ -506,8 +514,9 @@ static int convert_to_timeout(uint64_t deadline, int *timeoutp)
 static int calculate_timeout_locked(struct timevents_worker_info *worker_info, int *timeoutp)
 {
 	uint64_t deadline;
+	decl_queue(struct timevent_handle, *cbqueue);
 
-	if (priority_queue_peek(&worker_info->deadlines, &deadline) != 0)
+	if (priority_queue_peek(&worker_info->deadlines, &deadline, (void *)&cbqueue) != 0)
 		return -1;
 
 	if (convert_to_timeout(deadline, timeoutp) != 0)
@@ -584,6 +593,7 @@ static void timevents_loop(void *arg)
 	struct timevent_handle *handle, *next;
 	struct pollfd fds[1];
 	decl_queue(struct timevent_handle, *cbqueue);
+	uint64_t deadline;
 	int timeout;
 	int rc;
 
@@ -605,8 +615,9 @@ static void timevents_loop(void *arg)
 		}
 
 		unlock_timevents_worker_mutex();
-
+		printf("poll timeout = %d\n", timeout);
 		rc = poll(fds, 1, timeout);
+		printf("return from poll\n");
 
 		if (lock_timevents_worker_mutex() != 0) {
 			release_timevents_worker(worker_info);
@@ -615,7 +626,12 @@ static void timevents_loop(void *arg)
 
 		if (rc == 0) {
 			/* timeout occured */
-			priority_queue_pop(&worker_info->deadlines, (const void **)&cbqueue);
+			if (priority_queue_peek(&worker_info->deadlines, &deadline, (const void **)&cbqueue) != 0) {
+				ASYNCIO_ERROR("Failed to peek into priority queue.\n");
+				unlock_timevents_worker_mutex();
+				release_timevents_worker(worker_info);
+				break;
+			}
 
 			/* Iterate through all callbacks for that deadline */
 			queue_foreach(cbqueue, handle, next) {
@@ -713,6 +729,8 @@ static int dispatch_handle_to_loop(struct timevent_handle *handle)
 		return -1;
 	}
 
+	printf("timeout: %d, deadline: %lu\n", handle->timeout, (size_t)handle->deadline);
+
 	handle->worker_info = &timevents_global_worker_info;
 	wake_timevents_worker_locked(&timevents_global_worker_info);
 
@@ -768,10 +786,19 @@ int timevent_continue(timevent_handle_t timhandle)
 {
 	struct timevent_handle *handle;
 	int oldstate;
+	uint64_t deadline;
 
 	disable_cancellations(&oldstate);
 
 	handle = (struct timevent_handle *)timhandle;
+
+	/* Recalculate deadline from timeout */
+	if (convert_to_deadline(handle->timeout, &deadline) != 0) {
+		restore_cancelstate(oldstate);
+		return -1;
+	}
+
+	handle->deadline = deadline;
 
 	/* Acquire reference for next worker dispatch. */
 	if (timevent_acquire_handle(handle) != 0) {

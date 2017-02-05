@@ -153,10 +153,11 @@ int priority_queue_lookup(struct priority_queue *queue, uint64_t priority, const
 	return 0;
 }
 
-int priority_queue_peek(struct priority_queue *queue, uint64_t *priorityp)
+int priority_queue_peek(struct priority_queue *queue, uint64_t *priorityp, const void **datap)
 {
 	struct prefix_tree_node **nodep;
 	uint64_t minpri;
+	const void *min_data;
 
 	if (queue->nentries == 0)
 		return -1;
@@ -165,8 +166,10 @@ int priority_queue_peek(struct priority_queue *queue, uint64_t *priorityp)
 	nodep = &queue->root;
 
 	while (*nodep != NULL) {
-		if ((*nodep)->priority < minpri)
+		if ((*nodep)->priority < minpri) {
 			minpri = (*nodep)->priority;
+			min_data = (*nodep)->data;
+		}
 
 		if ((*nodep)->next_0 != NULL)
 			nodep = &((*nodep)->next_0);
@@ -175,10 +178,11 @@ int priority_queue_peek(struct priority_queue *queue, uint64_t *priorityp)
 	}
 
 	*priorityp = minpri;
+	*datap = min_data;
 	return 0;
 }
 
-int priority_queue_pop(struct priority_queue *queue, const void **datap)
+int priority_queue_pop(struct priority_queue *queue, uint64_t *priorityp, const void **datap)
 {
 	struct prefix_tree_node **nodep;
 	struct prefix_tree_node **min_nodep;
@@ -202,6 +206,7 @@ int priority_queue_pop(struct priority_queue *queue, const void **datap)
 			nodep = &((*nodep)->next_1);
 	}
 
+	*priorityp = (*min_nodep)->priority;
 	*datap = (*min_nodep)->data;
 	fix_tree_branch(queue, min_nodep);
 	--(queue->nentries);
