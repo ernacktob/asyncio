@@ -637,6 +637,7 @@ static void fdevent_threadpool_completed(void *arg)
 		unlock_fdevents_worker_mutex();
 	}
 
+	/* XXX Check if handle->continue, dont notify if set */
 	notify_fdevent_handle_finished(handle);
 
 	/* Release threadpool's reference to handle */

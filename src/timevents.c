@@ -6,8 +6,6 @@
 #include <fcntl.h>
 #include <time.h>
 
-#include <stdio.h>
-
 #include "timevents.h"
 #include "threadpool.h"
 #include "cancellations.h"
@@ -516,6 +514,11 @@ static int calculate_timeout_locked(struct timevents_worker_info *worker_info, i
 	uint64_t deadline;
 	decl_queue(struct timevent_handle, *cbqueue);
 
+	if (priority_queue_empty(&worker_info->deadlines)) {
+		*timeoutp = -1;
+		return 0;
+	}
+
 	if (priority_queue_peek(&worker_info->deadlines, &deadline, (void *)&cbqueue) != 0)
 		return -1;
 
@@ -609,15 +612,14 @@ static void timevents_loop(void *arg)
 		}
 
 		if (calculate_timeout_locked(worker_info, &timeout) != 0) {
+			ASYNCIO_ERROR("Failed to calculate timeout.\n");
 			unlock_timevents_worker_mutex();
 			release_timevents_worker(worker_info);
 			break;
 		}
 
 		unlock_timevents_worker_mutex();
-		printf("poll timeout = %d\n", timeout);
 		rc = poll(fds, 1, timeout);
-		printf("return from poll\n");
 
 		if (lock_timevents_worker_mutex() != 0) {
 			release_timevents_worker(worker_info);
@@ -728,8 +730,6 @@ static int dispatch_handle_to_loop(struct timevent_handle *handle)
 		unlock_timevents_worker_mutex();
 		return -1;
 	}
-
-	printf("timeout: %d, deadline: %lu\n", handle->timeout, (size_t)handle->deadline);
 
 	handle->worker_info = &timevents_global_worker_info;
 	wake_timevents_worker_locked(&timevents_global_worker_info);

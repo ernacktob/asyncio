@@ -20,6 +20,8 @@ struct priority_queue {
 	struct prefix_tree_node *first;
 };
 
+#define priority_queue_empty(queue) ((queue)->nentries == 0)
+
 int priority_queue_init(struct priority_queue *queue, size_t maxentries);
 int priority_queue_insert(struct priority_queue *queue, uint64_t priority, const void *data);
 int priority_queue_modify(struct priority_queue *queue, uint64_t priority, const void *data);
