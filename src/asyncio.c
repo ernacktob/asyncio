@@ -352,7 +352,6 @@ int asyncio_acquire(asyncio_handle_t ahandle)
 {
 	struct asyncio_handle *handle;
 	int oldstate;
-	int rc;
 
 	disable_cancellations(&oldstate);
 
@@ -373,7 +372,7 @@ int asyncio_acquire(asyncio_handle_t ahandle)
 
 	unlock_asyncio_handle(handle);
 	restore_cancelstate(oldstate);
-	return rc;
+	return 0;
 }
 
 __attribute__((visibility("default")))
