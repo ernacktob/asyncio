@@ -1,4 +1,13 @@
+UNAME = $(shell uname)
+
+ifeq ($(UNAME), Darwin)
+LDFLAGS = -dylib -macosx_version_min 10.8
 TARGET = libasyncio.dylib
+else
+LDFLAGS = -shared
+TARGET = libasyncio.so
+endif
+
 IDIR = include
 SRCDIR = src
 ODIR = obj
@@ -6,7 +15,6 @@ LIBS = -lpthread
 CC = gcc
 CFLAGS = -Wall -Wextra -Werror -pedantic -fvisibility=hidden
 LD = ld
-LDFLAGS = -dylib -macosx_version_min 10.8
 
 .PHONY: default all objdir tests clean
 
