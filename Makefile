@@ -19,12 +19,14 @@ CC = gcc
 CFLAGS = -Wall -Wextra -Werror -pedantic -fPIC -fvisibility=hidden
 LD = ld
 
-.PHONY: default all objdir tests clean
+.PHONY: default all objdir public_header tests clean
 
 default: $(TARGET)
 all: default
 objdir:
 	mkdir obj
+public_header:
+	cp $(IDIR)/asyncio.h .
 
 HEADERS = $(wildcard $(IDIR)/*.h)
 SOURCES = $(wildcard $(SRCDIR)/*.c)
@@ -33,7 +35,7 @@ OBJECTS = $(patsubst $(SRCDIR)/%.c, $(ODIR)/%.o, $(SOURCES))
 $(ODIR)/%.o: $(SRCDIR)/%.c $(HEADERS)
 	$(CC) -c $(CFLAGS) -I$(IDIR) $< -o $@
 
-$(TARGET): objdir $(OBJECTS)
+$(TARGET): objdir public_header $(OBJECTS)
 	$(LD) $(LDFLAGS) $(OBJECTS) $(LIBS) -o $@
 
 tests:
@@ -41,5 +43,6 @@ tests:
 
 clean:
 	rm -f $(TARGET)
+	rm -f asyncio.h
 	rm -rf obj
 	$(MAKE) -C tests clean
