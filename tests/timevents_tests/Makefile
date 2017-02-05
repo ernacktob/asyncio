@@ -2,7 +2,7 @@ IDIR = ../include
 ODIR = ../obj
 CC = gcc
 CFLAGS = -Wall -Wextra -Werror -pedantic
-LIBS = -lpthread
+LIBS = -lpthread -lrt
 
 .PHONY: all clean
 
