@@ -11,7 +11,7 @@ EXAMPLES_CFLAGS = -Wl,-rpath=$(shell pwd)	# Tell linker where to look for libasy
 LIBS = -lpthread -lrt
 endif
 
-export EXAMPELS_CFLAGS	# Make available for sub-makes
+export EXAMPLES_CFLAGS	# Make available for sub-makes
 export LIBS
 
 IDIR = include
