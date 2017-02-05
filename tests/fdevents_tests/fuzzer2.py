@@ -4,9 +4,9 @@ import time
 import random
 import resource
 
-CONNECTIONS_PER_SECOND = 4900
+CONNECTIONS_PER_SECOND = 3900
 MAXTIME_PER_CONNECTION = 20
-MAX_CONCURRENT_CONNECTIONS = 5000
+MAX_CONCURRENT_CONNECTIONS = 4000
 GRANULARITY = 1000000
 
 def run_client():
@@ -35,7 +35,8 @@ def run_client():
 	sleep_time = stop_sleep_time - start_sleep_time
 	print "Connect time: %f ms, transaction time: %f ms"%(1000*(connected_time - start_time), 1000*(stop_time - connected_time - sleep_time))
 
-resource.setrlimit(resource.RLIMIT_NOFILE, (MAX_CONCURRENT_CONNECTIONS, -1))
+cur_lim, max_lim = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (MAX_CONCURRENT_CONNECTIONS, max_lim))
 
 threads = []
 

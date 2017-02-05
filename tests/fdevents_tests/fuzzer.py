@@ -8,9 +8,9 @@ import errno
 import sys
 import math
 
-CONNECTIONS_PER_SECOND = 4900
+CONNECTIONS_PER_SECOND = 3900
 MAXTIME_PER_CONNECTION = 20
-MAX_CONCURRENT_CONNECTIONS = 5000
+MAX_CONCURRENT_CONNECTIONS = 4000
 GRANULARITY = 1000000
 
 def stddev(values):
@@ -60,7 +60,8 @@ class ClientState(object):
 		self.connect_time = 1000 * (self.connect_stop_time - self.connect_start_time)
 		self.receive_time = 1000 * (self.receive_stop_time - self.receive_start_time)
 
-resource.setrlimit(resource.RLIMIT_NOFILE, (MAX_CONCURRENT_CONNECTIONS, -1))
+cur_lim, max_lim = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (MAX_CONCURRENT_CONNECTIONS, max_lim))
 sockets = [socket.socket(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP) for i in range(CONNECTIONS_PER_SECOND)]
 states = {}
 waitsocks = {}
