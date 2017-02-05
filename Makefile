@@ -49,3 +49,4 @@ clean:
 	rm -f asyncio.h
 	rm -rf obj
 	$(MAKE) -C tests clean
+	$(MAKE) -C examples clean
