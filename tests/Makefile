@@ -7,9 +7,9 @@ CFLAGS = -Wall -Wextra -Werror -pedantic
 
 all: fdevents_tests hashtable_tests priority_queue_tests threadpool_tests timevents_tests
 objdir:
-	mkdir obj
+	mkdir -p obj
 incdir:
-	mkdir include
+	mkdir -p include
 
 HEADERS = $(wildcard $(IDIR)/*.h)
 OBJECTS = $(patsubst ../src/%.c, $(ODIR)/%.o, $(wildcard ../src/*.c))

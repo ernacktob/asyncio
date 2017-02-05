@@ -24,7 +24,7 @@ LD = ld
 default: $(TARGET)
 all: default
 objdir:
-	mkdir obj
+	mkdir -p obj
 public_header:
 	cp $(IDIR)/asyncio.h .
 
