@@ -4,7 +4,7 @@ ifeq ($(UNAME), Darwin)
 LDFLAGS = -dylib -macosx_version_min 10.8
 TARGET = libasyncio.dylib
 else
-LDFLAGS = -shared
+LDFLAGS = -shared -fPIC
 TARGET = libasyncio.so
 endif
 
