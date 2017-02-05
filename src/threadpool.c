@@ -850,26 +850,6 @@ int threadpool_cancel(threadpool_handle_t thandle)
 			queue_remove(&workers_task_queue, handle);
 			handle->in_worker_queue = 0;
 			notify_handle_finished(handle);
-
-			ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_lock) ARG("%p", &handle->finished_cond_mtx));
-			if ((rc = pthread_mutex_lock(&handle->finished_cond_mtx)) == 0) {
-				handle->finished = 1;
-
-				ASYNCIO_DEBUG_CALL(2 FUNC(pthread_cond_broadcast) ARG("%p", &handle->finished_cond));
-				if ((rc = pthread_cond_broadcast(&handle->finished_cond)) != 0) {
-					errno = rc;
-					ASYNCIO_SYSERROR("pthread_cond_broadcast");
-				}
-
-				ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &handle->finished_cond_mtx));
-				if ((rc = pthread_mutex_unlock(&handle->finished_cond_mtx)) != 0) {
-					errno = rc;
-					ASYNCIO_SYSERROR("pthread_mutex_unlock");
-				}
-			} else {
-				errno = rc;
-				ASYNCIO_SYSERROR("pthread_mutex_lock");
-			}
 		} else {
 			ASYNCIO_DEBUG_CALL(2 FUNC(pthread_cancel) ARG("%016llx", handle->thread));
 			if ((rc = pthread_cancel(handle->thread)) != 0) {

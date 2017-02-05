@@ -7,8 +7,10 @@ CFLAGS = -Wall -Wextra -Werror -pedantic
 
 all: test1 test2 test3 test4
 
-%: %.c
-	$(CC) $(CFLAGS) -I$(IDIR) $(ODIR)/*.o $@.c $(LIBS) -o $@
+OBJECTS = $(wildcard $(ODIR)/*.o)
+
+%: %.c $(OBJECTS)
+	$(CC) $(CFLAGS) -I$(IDIR) $(OBJECTS) $@.c $(LIBS) -o $@
 
 clean:
 	rm -f test1
