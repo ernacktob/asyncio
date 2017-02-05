@@ -5,7 +5,7 @@ LIBDIR = $(ROOTDIR)
 LIBS = -lasyncio
 
 CC = gcc
-CFLAGS = -Wall -Wextra -Werror -pedantic
+CFLAGS = -Wall -Wextra -Werror -pedantic $(EXAMPLES_CFLAGS)
 
 .PHONY: default all clean
 

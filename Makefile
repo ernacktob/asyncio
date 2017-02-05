@@ -7,9 +7,11 @@ LIBS = -lpthread
 else
 LDFLAGS = -shared
 TARGET = libasyncio.so
+EXAMPLES_CFLAGS = -Wl,-rpath=$(shell pwd)	# Tell linker where to look for libasyncio.so when linking examples
 LIBS = -lpthread -lrt
 endif
 
+export EXAMPELS_CFLAGS	# Make available for sub-makes
 export LIBS
 
 IDIR = include
