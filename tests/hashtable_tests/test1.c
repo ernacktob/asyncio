@@ -17,7 +17,6 @@ int main()
 	struct hashtable table;
 	int key;
 	int *value;
-	size_t count;
 	int i;
 
 	srand(time(NULL));
@@ -38,8 +37,6 @@ int main()
 		assert(hashtable_lookup(&table, sizeof keys[i], &keys[i], (const void **)&value) != 0);
 		assert(*value == values[i]);
 	}
-
-	count = NUM_KEYS;
 
 	for (i = 0; i < NUM_TRIALS; i++) {
 		key = rand() % NUM_KEYS;
