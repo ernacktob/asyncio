@@ -7,7 +7,7 @@ CFLAGS = -Wall -Wextra -Werror -pedantic
 
 all: test1 test2 test3 test4
 
-%:
+%: %.c
 	$(CC) $(CFLAGS) -I$(IDIR) $(ODIR)/*.o $@.c $(LIBS) -o $@
 
 clean:
