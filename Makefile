@@ -4,7 +4,7 @@ ifeq ($(UNAME), Darwin)
 LDFLAGS = -dylib -macosx_version_min 10.8
 TARGET = libasyncio.dylib
 else
-LDFLAGS = -shared -fPIC
+LDFLAGS = -shared
 TARGET = libasyncio.so
 endif
 
@@ -13,7 +13,7 @@ SRCDIR = src
 ODIR = obj
 LIBS = -lpthread
 CC = gcc
-CFLAGS = -Wall -Wextra -Werror -pedantic -fvisibility=hidden
+CFLAGS = -Wall -Wextra -Werror -pedantic -fPIC -fvisibility=hidden
 LD = ld
 
 .PHONY: default all objdir tests clean
