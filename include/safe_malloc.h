@@ -1,14 +1,14 @@
 #ifndef SAFE_MALLOC_H
 #define SAFE_MALLOC_H
 
-/* These functions should not be called while holding other locks just in case they block */
+#include <stdlib.h>
 
 #if !defined(MALLOC_IS_THREAD_SAFE) || !defined(FREE_IS_THREAD_SAFE)
-#include <stdlib.h>
 #include <sys/errno.h>
 #include <pthread.h>
 #endif
 
+/* These functions should not be called while holding other locks just in case they block */
 #ifdef MALLOC_IS_THREAD_SAFE
 #define safe_malloc(size) malloc(size)
 #else
