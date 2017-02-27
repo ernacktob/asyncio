@@ -9,11 +9,11 @@ programmer not to worry about writing his or her own eventloops and threadpools.
 
 The API currently allows the following functionalities:
 
-1.  Dispatch a function to be executed asynchronously by a threadpool.
-2.  Wait for events on a file descriptor, and call a user-provided callback when an event occurs.
-3.  Execute a function asynchronously after a specified amount of time.
-4.  Blocking until a previous asynchronous task has completed (joining).
-5.  Cancelling an asynchronous task.
+*  Dispatch a function to be executed asynchronously by a threadpool.
+*  Wait for events on a file descriptor, and call a user-provided callback when an event occurs.
+*  Execute a function asynchronously after a specified amount of time.
+*  Blocking until a previous asynchronous task has completed (joining).
+*  Cancelling an asynchronous task.
 
 For more details about the API, see the API section.
 
@@ -35,6 +35,7 @@ The library uses POSIX pthreads and the poll() system call interface for file de
 int asyncio_dispatch(asyncio_dispatch_fn fn, void *arg, asyncio_flag_t flags, asyncio_handle_t *handle);
 ````  
 Dispatch a function to be executed asynchronously by a threadpool.  
+
 | Parameter | Purpose |
 |:---------:|:-------:|
 | `fn`      | Pointer to function that will be executed. |
@@ -47,7 +48,8 @@ Dispatch a function to be executed asynchronously by a threadpool.
 int asyncio_fdevent(int fd, asyncio_fdevent_t events, asyncio_fdevent_cb cb, void *arg, asyncio_flag_t flags, asyncio_handle_t *handle);
 ````
 Wait for events on a file descriptor and call the user-provided callback when an event occurs.  
-The event is only caught once; to wait for following events, use `asyncio_continue` or re-register with `asyncio_fdevent`.
+The event is only caught once; to wait for following events, use `asyncio_continue` or re-register with `asyncio_fdevent`.  
+
 | Parameter | Purpose |
 |:---------:|:-------:|
 | `fd`      | File descriptor to wait on. |
@@ -61,7 +63,8 @@ The event is only caught once; to wait for following events, use `asyncio_contin
 ````C
 int asyncio_timevent(asyncio_time_t timeout, asyncio_timevent_cb cb, void *arg, asyncio_flag_t flags, asyncio_handle_t *handle);
 ````
-Execute a user-provided callback after a certain amount of time has elapsed.
+Execute a user-provided callback after a certain amount of time has elapsed.  
+
 | Parameter | Purpose |
 |:---------:|:-------:|
 | `timeout` | Time to wait before calling the callback (in milliseconds). |
@@ -125,6 +128,7 @@ This is implemented as a macro, and is called within an `asyncio_fdevent_cb` or 
 
 **FLAGS**  
 The following flags can be set independently in any of the `asyncio_dispatch`, `asyncio_fdevent` or `asyncio_timevent` functions:  
-1.  `ASYNCIO_FLAG_CONTRACTOR`: Use a "contractor thread" instead of "worker thread" to run function/callback. The threadpool uses a fixed amount of worker threads executing tasks in a queue, but can also spawn additional threads called "contractors" if the user desires. This may be useful if the function will take a long time to complete, in order to avoid stalling the worker queue, but it does not lead to scalable code because eventually the operating system's thread limit will be reached.
-2.  `ASYNCIO_FLAG_CANCELLABLE`: Allow a task to be cancellable. See `asyncio_cancel` and the pthread documentation for details.
-3.  `ASYNCIO_FLAG_ASYNCCANCEL`: Make task asynchronously cancellable. See `asyncio_cancel` and the pthread documentation for details. Note that if this is set while `ASYNCIO_FLAG_CANCELLABLE` is not set, this will have no effect.
+
+*  `ASYNCIO_FLAG_CONTRACTOR`: Use a "contractor thread" instead of "worker thread" to run function/callback. The threadpool uses a fixed amount of worker threads executing tasks in a queue, but can also spawn additional threads called "contractors" if the user desires. This may be useful if the function will take a long time to complete, in order to avoid stalling the worker queue, but it does not lead to scalable code because eventually the operating system's thread limit will be reached.  
+*  `ASYNCIO_FLAG_CANCELLABLE`: Allow a task to be cancellable. See `asyncio_cancel` and the pthread documentation for details.  
+*  `ASYNCIO_FLAG_ASYNCCANCEL`: Make task asynchronously cancellable. See `asyncio_cancel` and the pthread documentation for details. Note that if this is set while `ASYNCIO_FLAG_CANCELLABLE` is not set, this will have no effect.
