@@ -83,8 +83,7 @@ int priority_queue_insert(struct priority_queue *queue, uint64_t priority, const
 
 		if (priority & (((uint64_t)1) << i)) {
 			nodep = &((*nodep)->next_1);
-		}
-		else {
+		} else {
 			nodep = &((*nodep)->next_0);
 		}
 	}

@@ -1026,8 +1026,21 @@ void threadpool_release_handle(threadpool_handle_t thandle)
 	}
 
 	/* Check for underflow */
-	if (handle->refcount > 0)
-		--(handle->refcount);
+	if (handle->refcount == 0) {
+		ASYNCIO_ERROR("Handle refcount already 0 before release.\n");
+
+		ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &handle->mtx));
+		if ((rc = pthread_mutex_unlock(&handle->mtx)) != 0) {
+			errno = rc;
+			ASYNCIO_SYSERROR("pthread_mutex_unlock");
+		}
+
+		restore_cancelstate(oldstate);
+		ASYNCIO_DEBUG_RETURN(VOIDRET);
+		return;
+	}
+
+	--(handle->refcount);
 
 	if (handle->refcount == 0) {
 		ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &handle->mtx));

@@ -132,3 +132,17 @@ The following flags can be set independently in any of the `asyncio_dispatch`, `
 *  `ASYNCIO_FLAG_CONTRACTOR`: Use a "contractor thread" instead of "worker thread" to run function/callback. The threadpool uses a fixed amount of worker threads executing tasks in a queue, but can also spawn additional threads called "contractors" if the user desires. This may be useful if the function will take a long time to complete, in order to avoid stalling the worker queue, but it does not lead to scalable code because eventually the operating system's thread limit will be reached.  
 *  `ASYNCIO_FLAG_CANCELLABLE`: Allow a task to be cancellable. See `asyncio_cancel` and the pthread documentation for details.  
 *  `ASYNCIO_FLAG_ASYNCCANCEL`: Make task asynchronously cancellable. See `asyncio_cancel` and the pthread documentation for details. Note that if this is set while `ASYNCIO_FLAG_CANCELLABLE` is not set, this will have no effect.
+
+**Return values**
+All functions that return `int` return `0` when successful, and `-1` on failure.  
+Currently there isn't a very detailed error code mechanism, instead errors are logged through the `ASYNCIO_SYSERROR` and `ASYNCIO_ERROR` macros.  
+
+## Tweaking
+Certain #defines can be tweaked to get better performance on your system. They can usually be found at the top of the relevant source files.  
+Some examples that might be interesting:  
+
+*  `MAX_WORKER_THREADS` (threadpool.c): Controls number of worker threads used for threadpool. Ideally should be close to number of cores. The default is set to 5.  
+*  `MAX_CONTRACTORS` (threadpool.c): Controls maximum number of contractor threads that can be spawned. Defaults to 1024.  
+*  `MAX_POLLFDS` (fdevents.c): Controls maximum number of file descriptors handled at once by `poll()`. The default is set to 10000.  
+*  `MAX_DEADLINES` (timevents.c): Controls maximum number of deadlines that can be handled by the timevents module. Defaults to 10000.  
+*  `MALLOC_IS_THREAD_SAFE` (safe_malloc.c): If defined, assumes the standard C library implementation for `malloc()` is thread-safe. Defined by default in Makefile. The `safe_malloc` macro will expand to `malloc` or to `malloc_locked`, which is a wrapper around `malloc` that uses a mutex before the call.
