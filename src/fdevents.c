@@ -606,8 +606,8 @@ static uint16_t to_fdevents_events(short poll_events)
 	uint16_t events;
 
 	events = 0;
-	SET_IF_SET(events, FDEVENT_EVENT_READ, poll_events, POLLIN | POLLRDBAND | POLLRDNORM | POLLPRI);
-	SET_IF_SET(events, FDEVENT_EVENT_WRITE, poll_events, POLLOUT | POLLWRBAND | POLLWRNORM);
+	SET_IF_SET(events, FDEVENT_EVENT_READ, poll_events, POLLIN | POLLPRI);
+	SET_IF_SET(events, FDEVENT_EVENT_WRITE, poll_events, POLLOUT);
 	SET_IF_SET(events, FDEVENT_EVENT_ERROR, poll_events, POLLERR | POLLHUP | POLLNVAL);
 
 	return events;
@@ -618,8 +618,8 @@ static short to_poll_events(uint16_t events)
 	short poll_events;
 
 	poll_events = 0;
-	SET_IF_SET(poll_events, POLLIN | POLLRDBAND | POLLRDNORM | POLLPRI, events, FDEVENT_EVENT_READ);
-	SET_IF_SET(poll_events, POLLOUT | POLLWRBAND | POLLWRNORM, events, FDEVENT_EVENT_WRITE);
+	SET_IF_SET(poll_events, POLLIN | POLLPRI, events, FDEVENT_EVENT_READ);
+	SET_IF_SET(poll_events, POLLOUT, events, FDEVENT_EVENT_WRITE);
 	SET_IF_SET(poll_events, POLLERR | POLLHUP | POLLNVAL, events, FDEVENT_EVENT_ERROR);
 
 	return poll_events;
