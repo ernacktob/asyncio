@@ -133,7 +133,7 @@ The following flags can be set independently in any of the `asyncio_dispatch`, `
 *  `ASYNCIO_FLAG_CANCELLABLE`: Allow a task to be cancellable. See `asyncio_cancel` and the pthread documentation for details.  
 *  `ASYNCIO_FLAG_ASYNCCANCEL`: Make task asynchronously cancellable. See `asyncio_cancel` and the pthread documentation for details. Note that if this is set while `ASYNCIO_FLAG_CANCELLABLE` is not set, this will have no effect.
 
-**Return values**
+**Return values**  
 All functions that return `int` return `0` when successful, and `-1` on failure.  
 Currently there isn't a very detailed error code mechanism, instead errors are logged through the `ASYNCIO_SYSERROR` and `ASYNCIO_ERROR` macros.  
 
@@ -146,3 +146,4 @@ Some examples that might be interesting:
 *  `MAX_POLLFDS` (fdevents.c): Controls maximum number of file descriptors handled at once by `poll()`. The default is set to 10000.  
 *  `MAX_DEADLINES` (timevents.c): Controls maximum number of deadlines that can be handled by the timevents module. Defaults to 10000.  
 *  `MALLOC_IS_THREAD_SAFE` (safe_malloc.c): If defined, assumes the standard C library implementation for `malloc()` is thread-safe. Defined by default in Makefile. The `safe_malloc` macro will expand to `malloc` or to `malloc_locked`, which is a wrapper around `malloc` that uses a mutex before the call.
+*  `DEBUG` (logging.c): If defined, detailed debugging information will be displayed with the `ASYNCIO_DEBUG_*` macros. These macros have not been used throughout the whole library due to the clutter they create in the code. They mostly show up in the threadpool code, used during initial debugging stages. Note that the debug macros will affect timing, and certain bugs may be triggered or hidden by using these macros. This is disabled by default.
