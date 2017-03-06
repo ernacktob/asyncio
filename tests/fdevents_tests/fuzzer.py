@@ -128,11 +128,19 @@ while len(sockets) > 0:
 
 		if event & select.POLLIN:
 			if states[s].state == "RECEIVING":
-				data = s.recv(1)
-	
+				try:
+					data = s.recv(1)
+				except Exception as e:
+					sys.stderr.write("Got exception during recv: %s\n"%str(e))
+					states[s].errored()
+					poll.unregister(s)
+					sockets.remove(s)
+					s.close()
+					continue
+
 				if len(data) == 0:
 					sys.stderr.write("Server closed connection unexpectedly\n")
-					states[s].error()
+					states[s].errored()
 					poll.unregister(s)
 					sockets.remove(s)
 					s.close()
@@ -152,14 +160,18 @@ while len(sockets) > 0:
 					waitsocks[deadline].append(s)
 					poll.unregister(s)
 			elif states[s].state == "FINISHED":
-				data = s.recv(1)
-	
-				if len(data) > 0:
-					sys.stderr.write("Got more data? " + data + "\n")
-					states[s].error()
-				else:
-					states[s].finished()
+				try:
+					data = s.recv(1)
 
+					if len(data) > 0:
+						sys.stderr.write("Got more data? " + data + "\n")
+						states[s].errored()
+					else:
+						states[s].finished()
+				except Exception as e:
+					sys.stderr.write("Got exception during recv: %s\n"%str(e))
+					states[s].errored()
+	
 				poll.unregister(s)
 				sockets.remove(s)
 				s.close()
@@ -174,13 +186,13 @@ while len(sockets) > 0:
 				poll.modify(s, select.POLLIN)
 		elif event & select.POLLHUP:
 			sys.stderr.write("Server closed connection unexpectedly\n")
-			states[s].error()
+			states[s].errored()
 			poll.unregister(s)
 			sockets.remove(s)
 			s.close()
 		else:
 			sys.stderr.write("Error in socket\n")
-			states[s].error()
+			states[s].errored()
 			poll.unregister(s)
 			sockets.remove(s)
 			s.close()

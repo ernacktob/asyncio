@@ -217,7 +217,7 @@ static int reference_fdevent_handle_locked(struct fdevent_handle *handle)
 	if (handle->refcount == UINT_MAX)
 		return -1;
 
-	++handle->refcount;
+	++(handle->refcount);
 	return 0;
 }
 
@@ -229,7 +229,7 @@ static void dereference_fdevent_handle_locked(struct fdevent_handle *handle)
 		return;
 	}
 
-	--handle->refcount;
+	--(handle->refcount);
 }
 
 static void unlock_finished_cond_mtx(void *arg)
@@ -754,17 +754,9 @@ static void fdevents_loop(void *arg)
 						/* Could use different links for next and prev in the copy, to avoid overwriting ->next and ->prev,
 						 * allowing us to only store those that are actually fired off events */
 
-						/* XXX Do not do this here but outside of the loop */
-						/* Acquire reference to pass to threadpool */
-						if (fdevent_acquire_handle(handle) != 0) {
-							ASYNCIO_ERROR("Failed to reference fdevent_handle.\n");
-							continue;
-						}
-
-						/* At this point the handle refcount is at least 3:
+						/* At this point the handle refcount is at least 2:
 						 * - the client thread that got the handle
-						 * - the fdevents_loop thread
-						 * - the threadpool dispatched thread */
+						 * - the fdevents_loop worker */
 
 						/* The callback queues are owned by the fdevents_loop, this is the only
 						 * thread that is allowed to remove handles from queues. It should not
