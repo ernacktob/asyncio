@@ -105,7 +105,7 @@ static int init_asyncio_threadpool_handle(struct asyncio_handle *handle, asyncio
 
 	handle->type = ASYNCIO_TYPE_THREAD;
 	handle->union_handle.thandle = thandle;
-	handle->refcount = 0;
+	handle->refcount = 1;
 	return 0;
 }
 
@@ -134,7 +134,7 @@ static int init_asyncio_fdevent_handle(struct asyncio_handle *handle, int fd, as
 
 	handle->type = ASYNCIO_TYPE_FDEVENT;
 	handle->union_handle.fdhandle = fdhandle;
-	handle->refcount = 0;
+	handle->refcount = 1;
 	return 0;
 }
 
@@ -162,7 +162,7 @@ static int init_asyncio_timevent_handle(struct asyncio_handle *handle, asyncio_t
 
 	handle->type = ASYNCIO_TYPE_TIMEVENT;
 	handle->union_handle.timhandle = timhandle;
-	handle->refcount = 0;
+	handle->refcount = 1;
 	return 0;
 }
 
@@ -391,6 +391,7 @@ void asyncio_release(asyncio_handle_t ahandle)
 	}
 
 	if (handle->refcount == 0) {
+		ASYNCIO_ERROR("AsyncIO handle refcount is 0 before release.\n");
 		unlock_asyncio_handle(handle);
 		restore_cancelstate(oldstate);
 		return;
