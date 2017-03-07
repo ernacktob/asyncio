@@ -801,6 +801,18 @@ int threadpool_cancel(threadpool_handle_t thandle)
 	if (handle->worker_info != NULL) {
 		if (handle->in_worker_queue) {
 			queue_remove(&workers_task_queue, handle);
+
+			/* decrement handle refcount since worker's reference is gone.
+			 * We should have at least 2 references at this point, one for
+			 * the worker threads, and one for the caller. */
+			if (handle->refcount < 2) {
+				ASYNCIO_ERROR("Threadpool handle refcount inconsistent.\n");
+				pthread_mutex_unlock(&worker_threads_mtx);
+				restore_cancelstate(oldstate);
+				return -1;
+			}
+
+			--(handle->refcount);
 			handle->in_worker_queue = 0;
 			notify_handle_finished(handle);
 		} else {
@@ -856,6 +868,18 @@ int threadpool_cancel(threadpool_handle_t thandle)
 
 	if (handle->in_contractor_queue) {
 		queue_remove(&contractors_task_queue, handle);
+
+		/* decrement handle refcount since contractor's reference is gone.
+		 * We should have at least 2 references at this point, one for
+		 * the contractor threads, and one for the caller. */
+		if (handle->refcount < 2) {
+			ASYNCIO_ERROR("Threadpool handle refcount inconsistent.\n");
+			pthread_mutex_unlock(&worker_threads_mtx);
+			restore_cancelstate(oldstate);
+			return -1;
+		}
+
+		--(handle->refcount);
 		notify_handle_finished(handle);
 	} else {
 		ASYNCIO_DEBUG_CALL(2 FUNC(pthread_cancel) ARG("%016llx", handle->thread));

@@ -1,7 +1,7 @@
 IDIR = ../include
 ODIR = obj
 CC = gcc
-CFLAGS = -Wall -Wextra -Werror -pedantic
+CFLAGS = -Wall -Wextra -Werror -pedantic -DMALLOC_IS_THREAD_SAFE -DFREE_IS_THREAD_SAFE
 
 .PHONY: all objdir incdir object_files header_files clean
 
