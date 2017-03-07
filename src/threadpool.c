@@ -21,18 +21,17 @@
 /* STRUCT DEFINITIONS */
 struct threadpool_handle {
 	pthread_mutex_t mtx;
-	uint64_t refcount;	/* Protected by mtx */
+	uint64_t refcount;			/* Protected by mtx */
 
 	struct threadpool_dispatch_info info;
 	pthread_t thread;
 	struct worker_thread_info *worker_info;	/* If NULL, handled by contractor instead of worker. Protected by worker_threads_mtx */
-	int in_worker_queue;	/* used to know if worker has it in its task queue. Protected by worker_threads_mtx */
+	int in_worker_queue;			/* used to know if worker has it in its task queue. Protected by worker_threads_mtx */
 
-	int in_contractor_queue;	/* Used to know if in contractor queue. Protected by contractors_mtx */
+	int in_contractor_queue;		/* Used to know if in contractor queue. Protected by contractors_mtx */
 
-	pthread_mutex_t finished_cond_mtx;
 	pthread_cond_t finished_cond;
-	int finished;		/* Protected by finished_cond_mtx */
+	int finished;				/* Protected by mtx */
 
 	/* Used for task queues */
 	struct threadpool_handle *prev;
@@ -40,14 +39,14 @@ struct threadpool_handle {
 };
 
 struct worker_thread_info {
-	int initialized;					/* Protected by worker_threads_mtx */
-	int running;						/* Protected by worker_threads_mtx */
+	int initialized;			/* Protected by worker_threads_mtx */
+	int running;				/* Protected by worker_threads_mtx */
 	pthread_t thread;
 };
 /* END STRUCT DEFINITIONS */
 
 /* PROTOTYPES */
-static void unlock_finished_cond_mtx(void *arg);
+static void unlock_handle_mtx(void *arg);
 
 static void notify_handle_finished(struct threadpool_handle *handle);
 
@@ -84,7 +83,7 @@ decl_queue(struct threadpool_handle, contractors_task_queue);		/* Protected by c
 static int contractors_initialized = 0;					/* Protected by contractors_mtx */
 /* END GLOBALS */
 
-static void unlock_finished_cond_mtx(void *arg)
+static void unlock_handle_mtx(void *arg)
 {
 	struct threadpool_handle *handle;
 	int rc;
@@ -93,8 +92,8 @@ static void unlock_finished_cond_mtx(void *arg)
 
 	handle = (struct threadpool_handle *)arg;
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &handle->finished_cond_mtx));
-	if ((rc = pthread_mutex_unlock(&handle->finished_cond_mtx)) != 0) {
+	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &handle->mtx));
+	if ((rc = pthread_mutex_unlock(&handle->mtx)) != 0) {
 		errno = rc;
 		ASYNCIO_SYSERROR("pthread_mutex_unlock");
 	}
@@ -108,8 +107,8 @@ static void notify_handle_finished(struct threadpool_handle *handle)
 
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", handle));
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_lock) ARG("%p", &handle->finished_cond_mtx));
-	if ((rc = pthread_mutex_lock(&handle->finished_cond_mtx)) == 0) {
+	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_lock) ARG("%p", &handle->mtx));
+	if ((rc = pthread_mutex_lock(&handle->mtx)) == 0) {
 		handle->finished = 1;
 
 		ASYNCIO_DEBUG_CALL(2 FUNC(pthread_cond_broadcast) ARG("%p", &handle->finished_cond));
@@ -118,8 +117,8 @@ static void notify_handle_finished(struct threadpool_handle *handle)
 			ASYNCIO_SYSERROR("pthread_cond_broadcast");
 		}
 
-		ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &handle->finished_cond_mtx));
-		if ((rc = pthread_mutex_unlock(&handle->finished_cond_mtx)) != 0) {
+		ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &handle->mtx));
+		if ((rc = pthread_mutex_unlock(&handle->mtx)) != 0) {
 			errno = rc;
 			ASYNCIO_SYSERROR("pthread_mutex_unlock");
 		}
@@ -478,31 +477,10 @@ static int init_threadpool_handle(struct threadpool_handle *handle, struct threa
 		return -1;
 	}
 
-	ASYNCIO_DEBUG_CALL(3 FUNC(pthread_mutex_init) ARG("%p", &handle->finished_cond_mtx) ARG("%p", NULL));
-	if ((rc = pthread_mutex_init(&handle->finished_cond_mtx, NULL)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_init");
-
-		ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_destroy) ARG("%p", &handle->mtx));
-		if ((rc = pthread_mutex_destroy(&handle->mtx)) != 0) {
-			errno = rc;
-			ASYNCIO_SYSERROR("pthread_mutex_destroy");
-		}
-
-		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
-		return -1;
-	}
-
 	ASYNCIO_DEBUG_CALL(3 FUNC(pthread_cond_init) ARG("%p", &handle->finished_cond) ARG("%p", NULL));
 	if ((rc = pthread_cond_init(&handle->finished_cond, NULL)) != 0) {
 		errno = rc;
 		ASYNCIO_SYSERROR("pthread_cond_init");
-
-		ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_destroy) ARG("%p", &handle->finished_cond_mtx));
-		if ((rc = pthread_mutex_destroy(&handle->finished_cond_mtx)) != 0) {
-			errno = rc;
-			ASYNCIO_SYSERROR("pthread_mutex_destroy");
-		}
 
 		ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_destroy) ARG("%p", &handle->mtx));
 		if ((rc = pthread_mutex_destroy(&handle->mtx)) != 0) {
@@ -537,12 +515,6 @@ static void cleanup_threadpool_handle(struct threadpool_handle *handle)
 	if ((rc = pthread_cond_destroy(&handle->finished_cond)) != 0) {
 		errno = rc;
 		ASYNCIO_SYSERROR("pthread_cond_destroy");
-	}
-
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_destroy) ARG("%p", &handle->finished_cond_mtx));
-	if ((rc = pthread_mutex_destroy(&handle->finished_cond_mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_destroy");
 	}
 
 	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_destroy) ARG("%p", &handle->mtx));
@@ -801,20 +773,9 @@ int threadpool_cancel(threadpool_handle_t thandle)
 	if (handle->worker_info != NULL) {
 		if (handle->in_worker_queue) {
 			queue_remove(&workers_task_queue, handle);
-
-			/* decrement handle refcount since worker's reference is gone.
-			 * We should have at least 2 references at this point, one for
-			 * the worker threads, and one for the caller. */
-			if (handle->refcount < 2) {
-				ASYNCIO_ERROR("Threadpool handle refcount inconsistent.\n");
-				pthread_mutex_unlock(&worker_threads_mtx);
-				restore_cancelstate(oldstate);
-				return -1;
-			}
-
-			--(handle->refcount);
 			handle->in_worker_queue = 0;
 			notify_handle_finished(handle);
+			threadpool_release_handle(handle);	/* Release worker's reference to handle */
 		} else {
 			ASYNCIO_DEBUG_CALL(2 FUNC(pthread_cancel) ARG("%016llx", handle->thread));
 			if ((rc = pthread_cancel(handle->thread)) != 0) {
@@ -868,19 +829,9 @@ int threadpool_cancel(threadpool_handle_t thandle)
 
 	if (handle->in_contractor_queue) {
 		queue_remove(&contractors_task_queue, handle);
-
-		/* decrement handle refcount since contractor's reference is gone.
-		 * We should have at least 2 references at this point, one for
-		 * the contractor threads, and one for the caller. */
-		if (handle->refcount < 2) {
-			ASYNCIO_ERROR("Threadpool handle refcount inconsistent.\n");
-			pthread_mutex_unlock(&worker_threads_mtx);
-			restore_cancelstate(oldstate);
-			return -1;
-		}
-
-		--(handle->refcount);
+		handle->in_contractor_queue = 0;
 		notify_handle_finished(handle);
+		threadpool_release_handle(handle);	/* Release contractor's reference to handle */
 	} else {
 		ASYNCIO_DEBUG_CALL(2 FUNC(pthread_cancel) ARG("%016llx", handle->thread));
 		if ((rc = pthread_cancel(handle->thread)) != 0) {
@@ -928,8 +879,8 @@ int threadpool_join(threadpool_handle_t thandle)
 
 	handle = (struct threadpool_handle *)thandle;
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_lock) ARG("%p", &handle->finished_cond_mtx));
-	if ((rc = pthread_mutex_lock(&handle->finished_cond_mtx)) != 0) {
+	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_lock) ARG("%p", &handle->mtx));
+	if ((rc = pthread_mutex_lock(&handle->mtx)) != 0) {
 		errno = rc;
 		ASYNCIO_SYSERROR("pthread_mutex_lock");
 
@@ -938,19 +889,19 @@ int threadpool_join(threadpool_handle_t thandle)
 		return -1;
 	}
 
-	/* Unlock the finished_cond_mtx in cleanup handler if cancelled here */
-	pthread_cleanup_push(unlock_finished_cond_mtx, handle);
+	/* Unlock the mtx in cleanup handler if cancelled here */
+	pthread_cleanup_push(unlock_handle_mtx, handle);
 
 	/* Restore cancelstate while waiting for condition variable
 	 * to allow cancellation in this case. But set cancellation type to DEFERRED
 	 * in order to make sure we cancel during pthread_cond_wait, which should guarantee
-	 * that the finished_cond_mtx is locked during the cleanup handler. */
+	 * that the mtx is locked during the cleanup handler. */
 	set_canceltype(PTHREAD_CANCEL_DEFERRED, &oldtype);
 	restore_cancelstate(oldstate);
 
 	while (!(handle->finished)) {
-		ASYNCIO_DEBUG_CALL(3 FUNC(pthread_cond_wait) ARG("%p", &handle->finished_cond) ARG("%p", &handle->finished_cond_mtx));
-		if ((rc = pthread_cond_wait(&handle->finished_cond, &handle->finished_cond_mtx)) != 0) {
+		ASYNCIO_DEBUG_CALL(3 FUNC(pthread_cond_wait) ARG("%p", &handle->finished_cond) ARG("%p", &handle->mtx));
+		if ((rc = pthread_cond_wait(&handle->finished_cond, &handle->mtx)) != 0) {
 			errno = rc;
 			ASYNCIO_SYSERROR("pthread_cond_wait");
 			break;
@@ -960,8 +911,8 @@ int threadpool_join(threadpool_handle_t thandle)
 	disable_cancellations(&oldstate);
 	restore_canceltype(oldtype);
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &handle->finished_cond_mtx));
-	if ((rc = pthread_mutex_unlock(&handle->finished_cond_mtx)) != 0) {
+	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &handle->mtx));
+	if ((rc = pthread_mutex_unlock(&handle->mtx)) != 0) {
 		errno = rc;
 		ASYNCIO_SYSERROR("pthread_mutex_unlock");
 	}
