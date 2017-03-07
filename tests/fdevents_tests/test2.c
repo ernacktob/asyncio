@@ -211,7 +211,7 @@ int main()
 
 	evinfo.fd = sockfd;
 	evinfo.events = FDEVENT_EVENT_READ;
-	evinfo.flags = FDEVENT_FLAG_NONE;
+	evinfo.flags = FDEVENT_FLAG_CANCELLABLE;
 	evinfo.cb = on_connect;
 	evinfo.arg = NULL;
 

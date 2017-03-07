@@ -448,13 +448,15 @@ static uint32_t get_threadpool_flags(uint32_t timevents_flags)
 {
 	uint32_t flags;
 
-	/* Do not enable cancellations by default here, because we don't want
-	 * execute_timevent_callback to be cancellable. It will set the user
+	/* Do not use ASYNCHRONOUS CANCELLATIONS here, because we don't want
+	 * execute_fdevent_callback to be async-cancellable. It will set the user
 	 * desired cancellation state/type there. */
 	flags = THREADPOOL_FLAG_NONE;
 
 	if (timevents_flags & TIMEVENT_FLAG_CONTRACTOR)
 		flags |= THREADPOOL_FLAG_CONTRACTOR;
+	if (timevents_flags & TIMEVENT_FLAG_CANCELLABLE)
+		flags |= THREADPOOL_FLAG_CANCELLABLE;
 
 	return flags;
 }
