@@ -24,11 +24,23 @@ struct threadpool_handle {
 	uint64_t refcount;			/* Protected by mtx */
 
 	struct threadpool_dispatch_info info;
-	pthread_t thread;
-	struct worker_thread_info *worker_info;	/* If NULL, handled by contractor instead of worker. Protected by worker_threads_mtx */
-	int in_worker_queue;			/* used to know if worker has it in its task queue. Protected by worker_threads_mtx */
 
+	pthread_t thread;			/* Thread (contractor or worker) executing this task. */
+	struct worker_thread_info *worker_info;	/* If not NULL, handle was pulled from worker task queue and is processed by worker. Protected by worker_threads_mtx */
+	int in_worker_queue;			/* Used to know if in worker task queue. Should never be 1 if worker_info is not NULL. Protected by worker_threads_mtx */
 	int in_contractor_queue;		/* Used to know if in contractor queue. Protected by contractors_mtx */
+
+	/* Notes about pthread_detach and threadpool handles with no more references (if ref > 0 do not detach because we want to support multiple cancels)
+	 * Format: (Location, Cause, Detach)
+	 * 1. (No queue and no thread, just created in threadpool_dispatch but dispatch failed, do not detach because invalid)
+	 * 2. (Workers queue no thread, impossible since queue has ref or else handle was cancelled so whoever cancelled has ref, no detach because invalid)
+	 * 3. (Worker thread no queue, handle finished and no other refs, do not detach because worker needs to continue with other handles)
+	 * 4. (Worker thread no queue, handle cancelled and ref released before cleanup handler, detach because pthread_t no more used)
+	 * 5. (Contractors queue no thread, impossible since queue has ref or else handle was cancelled so whoever has ref, no detach because invalid)
+	 * 6. (Contractors thread no queue, handle finished or was cancelled, detach because pthread_t no more used)
+	 *
+	 * If detach, use threadpool_release_handle_with_detach.
+	 */
 
 	pthread_cond_t finished_cond;
 	int finished;				/* Protected by mtx */
@@ -74,6 +86,7 @@ static int init_threadpool_handle(struct threadpool_handle *handle, struct threa
 static void cleanup_threadpool_handle(struct threadpool_handle *handle);
 
 static void init_worker_info(struct worker_thread_info *info);
+static void threadpool_release_handle_with_detach(struct threadpool_handle *handle);
 /* END PROTOTYPES */
 
 /* GLOBALS */
@@ -276,7 +289,7 @@ static void contractor_cleanup(void *arg)
 		handle->info.cancelled_info.cb(handle->info.cancelled_info.arg);
 
 	/* Release our handle */
-	threadpool_release_handle(handle);
+	threadpool_release_handle_with_detach(handle);
 
 	contractor_finished();
 
@@ -311,18 +324,8 @@ static void *contractor_thread(void *arg)
 	disable_cancellations(&oldstate1);
 	restore_canceltype(oldtype);
 
-	pthread_cleanup_pop(0);
-
-	/* Broadcast condition that thread finished */
-	notify_handle_finished(handle);
-
-	/* Call completed callback */
-	if (handle->info.completed_info.cb != NULL)
-		handle->info.completed_info.cb(handle->info.completed_info.arg);
-
-	threadpool_release_handle(handle); /* It was acquired implicitly by threadpool_dispatch when it dispatched it to us */
-
-	contractor_finished();
+	/* Pop and execute cleanup handler */
+	pthread_cleanup_pop(1);
 
 	restore_cancelstate(oldstate);
 	ASYNCIO_DEBUG_RETURN(RET("%p", NULL));
@@ -335,7 +338,7 @@ static void worker_handle_cleanup(void *arg)
 
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", arg));
 
-	/* handle was acquired in contractor_thread */
+	/* handle was acquired in worker_thread */
 	handle = (struct threadpool_handle *)arg;
 
 	notify_handle_finished(handle);
@@ -345,7 +348,7 @@ static void worker_handle_cleanup(void *arg)
 		handle->info.cancelled_info.cb(handle->info.cancelled_info.arg);
 
 	/* Release our handle */
-	threadpool_release_handle(handle);
+	threadpool_release_handle_with_detach(handle);
 
 	ASYNCIO_DEBUG_RETURN(VOIDRET);
 }
@@ -420,21 +423,12 @@ static void *worker_thread(void *arg)
 		disable_cancellations(&oldstate1);
 		restore_canceltype(oldtype);
 
-		pthread_cleanup_pop(0);
-
-		/* Broadcast condition that thread finished */
-		notify_handle_finished(handle);
-
-		/* Call completed callback */
-		if (handle->info.completed_info.cb != NULL)
-			handle->info.completed_info.cb(handle->info.completed_info.arg);
-
-		threadpool_release_handle(handle);
+		/* Pop and execute cleanup handler */
+		pthread_cleanup_pop(1);
 	}
 
-	pthread_cleanup_pop(0);
-	worker_info->running = 0;
-
+	/* Pop and execute cleanup handler (we shouldn't ever get here, by the way...) */
+	pthread_cleanup_pop(1);
 	restore_cancelstate(oldstate);
 
 	ASYNCIO_DEBUG_RETURN(RET("%p", NULL));
@@ -446,6 +440,12 @@ static int push_worker_task_locked(struct threadpool_handle *handle)
 	int rc;
 
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", handle));
+
+	if (handle->worker_info != NULL) {
+		ASYNCIO_ERROR("Handle cannot be both in worker task queue and have worker_info not NULL.");
+		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
+		return -1;
+	}
 
 	/* Push new task into worker task queue */
 	queue_push(&workers_task_queue, handle);
@@ -549,15 +549,6 @@ static void cleanup_threadpool_handle(struct threadpool_handle *handle)
 
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", handle));
 
-	/* Should only detach if handle was with contractor. Worker threads are detached in worker cleanup. */
-	if (handle->worker_info == NULL) {
-		ASYNCIO_DEBUG_CALL(2 FUNC(pthread_detach) ARG("%016llx", handle->thread));
-		if ((rc = pthread_detach(handle->thread)) != 0) {	/* Release pthread_t ressources for that thread (this is what allows multiple pthread_cancels()) */
-			errno = rc;
-			ASYNCIO_SYSERROR("pthread_detach");
-		}
-	}
-
 	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_cond_destroy) ARG("%p", &handle->finished_cond));
 	if ((rc = pthread_cond_destroy(&handle->finished_cond)) != 0) {
 		errno = rc;
@@ -654,7 +645,8 @@ static int dispatch_worker(struct threadpool_handle *handle)
 		workers_initialized = 1;
 	}
 
-	/* XXX Is this really necessary? Used in case pthread_create fails during worker cleanup,
+	/* XXX Is this really necessary to do more than once, after first initialization?
+	 * Could also be used in case pthread_create fails during worker cleanup,
 	 * so that we keep trying to respawn a worker after it got cancelled. */
 	for (i = 0; i < MAX_WORKER_THREADS; i++) {
 		worker_info = &worker_threads[i];
@@ -968,6 +960,54 @@ int threadpool_acquire_handle(threadpool_handle_t thandle)
 	restore_cancelstate(oldstate);
 	ASYNCIO_DEBUG_RETURN(RET("%d", 0));
 	return 0;
+}
+
+static void threadpool_release_handle_with_detach(struct threadpool_handle *handle)
+{
+	int oldstate;
+	int rc;
+
+	ASYNCIO_DEBUG_ENTER(1 ARG("%p", handle));
+	disable_cancellations(&oldstate);
+
+	if (lock_handle_mtx(handle) != 0) {
+		ASYNCIO_ERROR("Failed to lock handle mtx.\n");
+		restore_cancelstate(oldstate);
+		ASYNCIO_DEBUG_RETURN(VOIDRET);
+		return;
+	}
+
+	/* Check for underflow */
+	if (handle->refcount == 0) {
+		ASYNCIO_ERROR("Handle refcount already 0 before release.\n");
+		unlock_handle_mtx(handle);
+		restore_cancelstate(oldstate);
+		ASYNCIO_DEBUG_RETURN(VOIDRET);
+		return;
+	}
+
+	--(handle->refcount);
+
+	if (handle->refcount == 0) {
+		unlock_handle_mtx(handle);
+		cleanup_threadpool_handle(handle);
+
+		ASYNCIO_DEBUG_CALL(2 FUNC(pthread_detach) ARG("%016llx", handle->thread));
+		if ((rc = pthread_detach(handle->thread)) != 0) {	/* Release pthread_t ressources for that thread (this is what allows multiple pthread_cancels()). Also see comments on top of file. */
+			errno = rc;
+			ASYNCIO_SYSERROR("pthread_detach");
+		}
+
+		safe_free(handle);
+
+		restore_cancelstate(oldstate);
+		ASYNCIO_DEBUG_RETURN(VOIDRET);
+		return;
+	}
+
+	unlock_handle_mtx(handle);
+	restore_cancelstate(oldstate);
+	ASYNCIO_DEBUG_RETURN(VOIDRET);
 }
 
 void threadpool_release_handle(threadpool_handle_t thandle)
