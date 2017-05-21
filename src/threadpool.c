@@ -46,6 +46,12 @@ struct worker_thread_info {
 /* END STRUCT DEFINITIONS */
 
 /* PROTOTYPES */
+static int lock_worker_threads_mtx();
+static void unlock_worker_threads_mtx();
+static int lock_contractors_mtx();
+static void unlock_contractors_mtx();
+
+static int lock_handle_mtx(struct threadpool_handle *handle);
 static void unlock_handle_mtx(void *arg);
 
 static void notify_handle_finished(struct threadpool_handle *handle);
@@ -83,6 +89,90 @@ decl_queue(struct threadpool_handle, contractors_task_queue);		/* Protected by c
 static int contractors_initialized = 0;					/* Protected by contractors_mtx */
 /* END GLOBALS */
 
+static int lock_worker_threads_mtx()
+{
+	int rc;
+
+	ASYNCIO_DEBUG_ENTER(VOIDARG);
+
+	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_lock) ARG("%p", &worker_threads_mtx));
+	if ((rc = pthread_mutex_lock(&worker_threads_mtx)) != 0) {
+		errno = rc;
+		ASYNCIO_SYSERROR("pthread_mutex_lock");
+		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
+		return - 1;
+	}
+
+	ASYNCIO_DEBUG_RETURN(RET("%d", 0));
+	return 0;
+}
+
+static void unlock_worker_threads_mtx()
+{
+	int rc;
+
+	ASYNCIO_DEBUG_ENTER(VOIDARG);
+
+	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &worker_threads_mtx));
+	if ((rc = pthread_mutex_unlock(&worker_threads_mtx)) != 0) {
+		errno = rc;
+		ASYNCIO_SYSERROR("pthread_mutex_unlock");
+	}
+
+	ASYNCIO_DEBUG_RETURN(VOIDRET);
+}
+
+static int lock_contractors_mtx()
+{
+	int rc;
+
+	ASYNCIO_DEBUG_ENTER(VOIDARG);
+
+	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_lock) ARG("%p", &contractors_mtx));
+	if ((rc = pthread_mutex_lock(&contractors_mtx)) != 0) {
+		errno = rc;
+		ASYNCIO_SYSERROR("pthread_mutex_lock");
+		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
+		return - 1;
+	}
+
+	ASYNCIO_DEBUG_RETURN(RET("%d", 0));
+	return 0;
+}
+
+static void unlock_contractors_mtx()
+{
+	int rc;
+
+	ASYNCIO_DEBUG_ENTER(VOIDARG);
+
+	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &contractors_mtx));
+	if ((rc = pthread_mutex_unlock(&contractors_mtx)) != 0) {
+		errno = rc;
+		ASYNCIO_SYSERROR("pthread_mutex_unlock");
+	}
+
+	ASYNCIO_DEBUG_RETURN(VOIDRET);
+}
+
+static int lock_handle_mtx(struct threadpool_handle *handle)
+{
+	int rc;
+
+	ASYNCIO_DEBUG_ENTER(ARG("%p", handle));
+
+	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_lock) ARG("%p", &handle->mtx));
+	if ((rc = pthread_mutex_lock(&handle->mtx)) != 0) {
+		errno = rc;
+		ASYNCIO_SYSERROR("pthread_mutex_lock");
+		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
+		return -1;
+	}
+
+	ASYNCIO_DEBUG_RETURN(RET("%d", 0));
+	return 0;
+}
+
 static void unlock_handle_mtx(void *arg)
 {
 	struct threadpool_handle *handle;
@@ -107,8 +197,7 @@ static void notify_handle_finished(struct threadpool_handle *handle)
 
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", handle));
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_lock) ARG("%p", &handle->mtx));
-	if ((rc = pthread_mutex_lock(&handle->mtx)) == 0) {
+	if (lock_handle_mtx(handle) == 0) {
 		handle->finished = 1;
 
 		ASYNCIO_DEBUG_CALL(2 FUNC(pthread_cond_broadcast) ARG("%p", &handle->finished_cond));
@@ -117,14 +206,9 @@ static void notify_handle_finished(struct threadpool_handle *handle)
 			ASYNCIO_SYSERROR("pthread_cond_broadcast");
 		}
 
-		ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &handle->mtx));
-		if ((rc = pthread_mutex_unlock(&handle->mtx)) != 0) {
-			errno = rc;
-			ASYNCIO_SYSERROR("pthread_mutex_unlock");
-		}
+		unlock_handle_mtx(handle);
 	} else {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_lock");
+		ASYNCIO_ERROR("Failed to lock handle mtx.\n");
 	}
 
 	ASYNCIO_DEBUG_RETURN(VOIDRET);
@@ -136,23 +220,15 @@ static void contractor_finished(void)
 	pthread_t thread;
 	int rc;
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_lock) ARG("%p", &contractors_mtx));
-	if ((rc = pthread_mutex_lock(&contractors_mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_lock");
+	if (lock_contractors_mtx() != 0) {
+		ASYNCIO_ERROR("Failed to lock contractors mtx.\n");
 		ASYNCIO_DEBUG_RETURN(VOIDRET);
 		return;
 	}
 
 	if (contractors_count == 0) {
 		ASYNCIO_ERROR("contractor count already 0.\n");
-
-		ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &contractors_mtx));
-		if ((rc = pthread_mutex_unlock(&contractors_mtx)) != 0) {
-			errno = rc;
-			ASYNCIO_SYSERROR("pthread_mutex_unlock");
-		}
-
+		unlock_contractors_mtx();
 		ASYNCIO_DEBUG_RETURN(VOIDRET);
 		return;
 	}
@@ -170,12 +246,7 @@ static void contractor_finished(void)
 
 			queue_push(&contractors_task_queue, handle);	/* XXX Should push back to where it was? */
 
-			ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &contractors_mtx));
-			if ((rc = pthread_mutex_unlock(&contractors_mtx)) != 0) {
-				errno = rc;
-				ASYNCIO_SYSERROR("pthread_mutex_unlock");
-			}
-
+			unlock_contractors_mtx();
 			ASYNCIO_DEBUG_RETURN(VOIDRET);
 			return;
 		}
@@ -185,12 +256,7 @@ static void contractor_finished(void)
 		++contractors_count;
 	}
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &contractors_mtx));
-	if ((rc = pthread_mutex_unlock(&contractors_mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_unlock");
-	}
-
+	unlock_contractors_mtx();
 	ASYNCIO_DEBUG_RETURN(VOIDRET);
 }
 
@@ -292,10 +358,8 @@ static void worker_cleanup(void *arg)
 
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", arg));
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_lock) ARG("%p", &worker_threads_mtx));
-	if ((rc = pthread_mutex_lock(&worker_threads_mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_lock");
+	if (lock_worker_threads_mtx() != 0) {
+		ASYNCIO_ERROR("Failed to lock worker threads mtx.\n");
 		ASYNCIO_DEBUG_RETURN(VOIDRET);
 		return;
 	}
@@ -312,12 +376,7 @@ static void worker_cleanup(void *arg)
 		ASYNCIO_SYSERROR("pthread_create\n");
 	}
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &worker_threads_mtx));
-	if ((rc = pthread_mutex_unlock(&worker_threads_mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_unlock");
-	}
-
+	unlock_worker_threads_mtx();
 	ASYNCIO_DEBUG_RETURN(VOIDRET);
 }
 
@@ -414,10 +473,8 @@ static int pull_worker_task(struct worker_thread_info *worker_info, struct threa
 
 	ASYNCIO_DEBUG_ENTER(2 ARG("%p", worker_info) ARG("%p", handlep));
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_lock) ARG("%p", &worker_threads_mtx));
-	if ((rc = pthread_mutex_lock(&worker_threads_mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_lock");
+	if (lock_worker_threads_mtx() != 0) {
+		ASYNCIO_ERROR("Failed to lock worker threads mtx.\n");
 		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
 		return -1;
 	}
@@ -428,12 +485,7 @@ static int pull_worker_task(struct worker_thread_info *worker_info, struct threa
 			errno = rc;
 			ASYNCIO_SYSERROR("pthread_cond_wait");
 
-			ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &worker_threads_mtx));
-			if ((rc = pthread_mutex_unlock(&worker_threads_mtx)) != 0) {
-				errno = rc;
-				ASYNCIO_SYSERROR("pthread_mutex_unlock");
-			}
-
+			unlock_worker_threads_mtx();
 			ASYNCIO_DEBUG_RETURN(RET("%d", -1));
 			return -1;
 		}
@@ -445,12 +497,7 @@ static int pull_worker_task(struct worker_thread_info *worker_info, struct threa
 	handle->worker_info = worker_info;
 	handle->in_worker_queue = 0; /* Protected by the worker_threads_mtx */
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &worker_threads_mtx));
-	if ((rc = pthread_mutex_unlock(&worker_threads_mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_unlock");
-		/* Return anyways since we already got the handle anyways... */
-	}
+	unlock_worker_threads_mtx();
 
 	*handlep = handle;
 	ASYNCIO_DEBUG_RETURN(RET("%d", 0));
@@ -544,10 +591,8 @@ static int dispatch_contractor(struct threadpool_handle *handle)
 
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", handle));
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_lock) ARG("%p", &contractors_mtx));
-	if ((rc = pthread_mutex_lock(&contractors_mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_lock");
+	if (lock_contractors_mtx() != 0) {
+		ASYNCIO_ERROR("Failed to lock contractors mtx.\n");
 		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
 		return -1;
 	}
@@ -575,10 +620,7 @@ static int dispatch_contractor(struct threadpool_handle *handle)
 		handle->in_contractor_queue = 1;
 	}
 
-	if ((rc = pthread_mutex_unlock(&contractors_mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_unlock");
-	}
+	unlock_contractors_mtx();
 
 	if (!success) {
 		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
@@ -598,10 +640,8 @@ static int dispatch_worker(struct threadpool_handle *handle)
 
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", handle));
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_lock) ARG("%p", &worker_threads_mtx));
-	if ((rc = pthread_mutex_lock(&worker_threads_mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_lock");
+	if (lock_worker_threads_mtx() != 0) {
+		ASYNCIO_ERROR("Failed to lock worker threads mtx.\n");
 		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
 		return -1;
 	}
@@ -635,23 +675,12 @@ static int dispatch_worker(struct threadpool_handle *handle)
 
 	if (push_worker_task_locked(handle) != 0) {
 		ASYNCIO_ERROR("Failed to push worker task.\n");
-
-		ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &worker_threads_mtx));
-		if ((rc = pthread_mutex_unlock(&worker_threads_mtx)) != 0) {
-			errno = rc;
-			ASYNCIO_SYSERROR("pthread_mutex_unlock");
-		}
-
+		unlock_worker_threads_mtx();
 		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
 		return -1;
 	}
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &worker_threads_mtx));
-	if ((rc = pthread_mutex_unlock(&worker_threads_mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_unlock");
-	}
-
+	unlock_worker_threads_mtx();
 	ASYNCIO_DEBUG_RETURN(RET("%d", 0));
 	return 0;
 }
@@ -759,11 +788,8 @@ int threadpool_cancel(threadpool_handle_t thandle)
 	if (pthread_equal(handle->thread, pthread_self()))
 		return -1;
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_lock) ARG("%p", &worker_threads_mtx));
-	if ((rc = pthread_mutex_lock(&worker_threads_mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_lock");
-
+	if (lock_worker_threads_mtx() != 0) {
+		ASYNCIO_ERROR("Failed to lock worker threads mtx.\n");
 		restore_cancelstate(oldstate);
 		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
 		return -1;
@@ -774,9 +800,18 @@ int threadpool_cancel(threadpool_handle_t thandle)
 		if (handle->in_worker_queue) {
 			queue_remove(&workers_task_queue, handle);
 			handle->in_worker_queue = 0;
+			unlock_worker_threads_mtx();
 			notify_handle_finished(handle);
+
+			/* Call cancelled callback */
+			if (handle->info.cancelled_info.cb != NULL)
+				handle->info.cancelled_info.cb(handle->info.cancelled_info.arg);
+
 			threadpool_release_handle(handle);	/* Release worker's reference to handle */
 		} else {
+			/* Must mean it was pulled out of worker queue, after which it is guaranteed to be in a worker thread */
+			unlock_worker_threads_mtx();
+
 			ASYNCIO_DEBUG_CALL(2 FUNC(pthread_cancel) ARG("%016llx", handle->thread));
 			if ((rc = pthread_cancel(handle->thread)) != 0) {
 				/* Some implementations return ESRCH if pthread_cancel is called
@@ -787,12 +822,6 @@ int threadpool_cancel(threadpool_handle_t thandle)
 					errno = rc;
 					ASYNCIO_SYSERROR("pthread_cancel");
 
-					ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &worker_threads_mtx));
-					if ((rc = pthread_mutex_unlock(&worker_threads_mtx)) != 0) {
-						errno = rc;
-						ASYNCIO_SYSERROR("pthread_mutex_unlock");
-					}
-
 					restore_cancelstate(oldstate);
 					ASYNCIO_DEBUG_RETURN(RET("%d", -1));
 					return -1;
@@ -800,28 +829,15 @@ int threadpool_cancel(threadpool_handle_t thandle)
 			}
 		}
 
-		ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &worker_threads_mtx));
-		if ((rc = pthread_mutex_unlock(&worker_threads_mtx)) != 0) {
-			errno = rc;
-			ASYNCIO_SYSERROR("pthread_mutex_unlock");
-		}
-
 		restore_cancelstate(oldstate);
 		ASYNCIO_DEBUG_RETURN(RET("%d", 0));
 		return 0;
 	}
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &worker_threads_mtx));
-	if ((rc = pthread_mutex_unlock(&worker_threads_mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_unlock");
-	}
+	unlock_worker_threads_mtx();
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_lock) ARG("%p", &contractors_mtx));
-	if ((rc = pthread_mutex_lock(&contractors_mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_lock");
-
+	if (lock_contractors_mtx() != 0) {
+		ASYNCIO_ERROR("Failed to lock contractors mtx.\n");
 		restore_cancelstate(oldstate);
 		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
 		return -1;
@@ -830,9 +846,18 @@ int threadpool_cancel(threadpool_handle_t thandle)
 	if (handle->in_contractor_queue) {
 		queue_remove(&contractors_task_queue, handle);
 		handle->in_contractor_queue = 0;
+		unlock_contractors_mtx();
+
 		notify_handle_finished(handle);
+
+		/* Call cancelled callback */
+		if (handle->info.cancelled_info.cb != NULL)
+			handle->info.cancelled_info.cb(handle->info.cancelled_info.arg);
+
 		threadpool_release_handle(handle);	/* Release contractor's reference to handle */
 	} else {
+		unlock_contractors_mtx();
+
 		ASYNCIO_DEBUG_CALL(2 FUNC(pthread_cancel) ARG("%016llx", handle->thread));
 		if ((rc = pthread_cancel(handle->thread)) != 0) {
 			/* Some implementations return ESRCH if pthread_cancel is called
@@ -843,23 +868,11 @@ int threadpool_cancel(threadpool_handle_t thandle)
 				errno = rc;
 				ASYNCIO_SYSERROR("pthread_cancel");
 
-				ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &contractors_mtx));
-				if ((rc = pthread_mutex_unlock(&contractors_mtx)) != 0) {
-					errno = rc;
-					ASYNCIO_SYSERROR("pthread_mutex_unlock");
-				}
-
 				restore_cancelstate(oldstate);
 				ASYNCIO_DEBUG_RETURN(RET("%d", -1));
 				return -1;
 			}
 		}
-	}
-
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &contractors_mtx));
-	if ((rc = pthread_mutex_unlock(&contractors_mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_unlock");
 	}
 
 	restore_cancelstate(oldstate);
@@ -879,11 +892,8 @@ int threadpool_join(threadpool_handle_t thandle)
 
 	handle = (struct threadpool_handle *)thandle;
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_lock) ARG("%p", &handle->mtx));
-	if ((rc = pthread_mutex_lock(&handle->mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_lock");
-
+	if (lock_handle_mtx(handle) != 0) {
+		ASYNCIO_ERROR("Failed to lock handle mtx.\n");
 		restore_cancelstate(oldstate);
 		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
 		return -1;
@@ -911,12 +921,7 @@ int threadpool_join(threadpool_handle_t thandle)
 	disable_cancellations(&oldstate);
 	restore_canceltype(oldtype);
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &handle->mtx));
-	if ((rc = pthread_mutex_unlock(&handle->mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_unlock");
-	}
-
+	unlock_handle_mtx(handle);
 	pthread_cleanup_pop(0);
 
 	restore_cancelstate(oldstate);
@@ -935,18 +940,14 @@ int threadpool_acquire_handle(threadpool_handle_t thandle)
 {
 	struct threadpool_handle *handle;
 	int oldstate;
-	int rc;
 
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", thandle));
 	disable_cancellations(&oldstate);
 
 	handle = (struct threadpool_handle *)thandle;
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_lock) ARG("%p", &handle->mtx));
-	if ((rc = pthread_mutex_lock(&handle->mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_lock");
-
+	if (lock_handle_mtx(handle) != 0) {
+		ASYNCIO_ERROR("Failed to lock handle mtx.\n");
 		restore_cancelstate(oldstate);
 		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
 		return -1;
@@ -955,13 +956,7 @@ int threadpool_acquire_handle(threadpool_handle_t thandle)
 	/* Check for overflow */
 	if (handle->refcount >= UINT64T_MAX) {
 		ASYNCIO_ERROR("handle refcount overflow\n");
-
-		ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &handle->mtx));
-		if ((rc = pthread_mutex_unlock(&handle->mtx)) != 0) {
-			errno = rc;
-			ASYNCIO_SYSERROR("pthread_mutex_unlock");
-		}
-
+		unlock_handle_mtx(handle);
 		restore_cancelstate(oldstate);
 		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
 		return -1;
@@ -969,12 +964,7 @@ int threadpool_acquire_handle(threadpool_handle_t thandle)
 
 	++(handle->refcount);
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &handle->mtx));
-	if ((rc = pthread_mutex_unlock(&handle->mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_unlock");
-	}
-
+	unlock_handle_mtx(handle);
 	restore_cancelstate(oldstate);
 	ASYNCIO_DEBUG_RETURN(RET("%d", 0));
 	return 0;
@@ -984,17 +974,14 @@ void threadpool_release_handle(threadpool_handle_t thandle)
 {
 	struct threadpool_handle *handle;
 	int oldstate;
-	int rc;
 
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", thandle));
 	disable_cancellations(&oldstate);
 
 	handle = (struct threadpool_handle *)thandle;
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_lock) ARG("%p", &handle->mtx));
-	if ((rc = pthread_mutex_lock(&handle->mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_lock");
+	if (lock_handle_mtx(handle) != 0) {
+		ASYNCIO_ERROR("Failed to lock handle mtx.\n");
 		restore_cancelstate(oldstate);
 		ASYNCIO_DEBUG_RETURN(VOIDRET);
 		return;
@@ -1003,13 +990,7 @@ void threadpool_release_handle(threadpool_handle_t thandle)
 	/* Check for underflow */
 	if (handle->refcount == 0) {
 		ASYNCIO_ERROR("Handle refcount already 0 before release.\n");
-
-		ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &handle->mtx));
-		if ((rc = pthread_mutex_unlock(&handle->mtx)) != 0) {
-			errno = rc;
-			ASYNCIO_SYSERROR("pthread_mutex_unlock");
-		}
-
+		unlock_handle_mtx(handle);
 		restore_cancelstate(oldstate);
 		ASYNCIO_DEBUG_RETURN(VOIDRET);
 		return;
@@ -1018,12 +999,7 @@ void threadpool_release_handle(threadpool_handle_t thandle)
 	--(handle->refcount);
 
 	if (handle->refcount == 0) {
-		ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &handle->mtx));
-		if ((rc = pthread_mutex_unlock(&handle->mtx)) != 0) {
-			errno = rc;
-			ASYNCIO_SYSERROR("pthread_mutex_unlock");
-		}
-
+		unlock_handle_mtx(handle);
 		cleanup_threadpool_handle(handle);
 
 		safe_free(handle);
@@ -1033,12 +1009,7 @@ void threadpool_release_handle(threadpool_handle_t thandle)
 		return;
 	}
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &handle->mtx));
-	if ((rc = pthread_mutex_unlock(&handle->mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_unlock");
-	}
-
+	unlock_handle_mtx(handle);
 	restore_cancelstate(oldstate);
 	ASYNCIO_DEBUG_RETURN(VOIDRET);
 }
