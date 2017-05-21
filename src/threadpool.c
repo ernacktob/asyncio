@@ -788,7 +788,7 @@ int threadpool_cancel(threadpool_handle_t thandle)
 	}
 
 	/* Remove handle from worker queue (if in worker) */
-	if (handle->worker_info != NULL) {
+	if (handle->in_worker_queue || handle->worker_info != NULL) {
 		if (handle->in_worker_queue) {
 			queue_remove(&workers_task_queue, handle);
 			handle->in_worker_queue = 0;
@@ -848,6 +848,9 @@ int threadpool_cancel(threadpool_handle_t thandle)
 
 		threadpool_release_handle(handle);	/* Release contractor's reference to handle */
 	} else {
+		/* Must be in contractor thread since it was neither in worker queue/thread nor contractor queue,
+		 * and the other possibility (being nowhere) only happens if dispatch failed which can't reach this point.
+		 * Also if handle completed / cancelled but still has refs? But this is why we can pthread_cancel multiple times (don't detach yet). */
 		unlock_contractors_mtx();
 
 		ASYNCIO_DEBUG_CALL(2 FUNC(pthread_cancel) ARG("%016llx", handle->thread));
