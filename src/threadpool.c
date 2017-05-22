@@ -41,7 +41,6 @@ struct threadpool_handle {
 };
 
 struct worker_thread_info {
-	int initialized;
 	int running;
 	pthread_t thread;
 };
@@ -61,11 +60,12 @@ static void contractor_cleanup(void *arg);
 static void *contractor_thread(void *arg);
 
 static void worker_handle_cleanup(void *arg);
-static void worker_cleanup(void *arg);
+static void worker_cleanup_with_respawn(void *arg);
 static void *worker_thread(void *arg);
 
+static int stop_all_worker_tasks_locked(void);
 static int push_worker_task_locked(struct threadpool_handle *handle);
-static int pull_worker_task(struct worker_thread_info *worker_info, struct threadpool_handle **handlep);
+static int pull_worker_task(struct worker_thread_info *worker_info, struct threadpool_handle **handlep, int *stopped);
 
 static int dispatch_contractor(struct threadpool_handle *handle);
 static int dispatch_worker(struct threadpool_handle *handle);
@@ -302,7 +302,7 @@ static void worker_handle_cleanup(void *arg)
 	ASYNCIO_DEBUG_RETURN(VOIDRET);
 }
 
-static void worker_cleanup(void *arg)
+static void worker_cleanup_with_respawn(void *arg)
 {
 	struct worker_thread_info *worker_info;
 	pthread_t thread;
@@ -335,21 +335,26 @@ static void *worker_thread(void *arg)
 	struct threadpool_handle *handle;
 	int oldstate, oldstate1;
 	int oldtype;
+	int stopped = 0;
 
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", arg));
 	disable_cancellations(&oldstate);
 
 	worker_info = (struct worker_thread_info *)arg;
 
-	pthread_cleanup_push(worker_cleanup, worker_info);
+	/* Respawn worker thread if we get cancelled */
+	pthread_cleanup_push(worker_cleanup_with_respawn, worker_info);
 
 	for (;;) {
-		if (pull_worker_task(worker_info, &handle) != 0) {
+		if (pull_worker_task(worker_info, &handle, &stopped) != 0) {
 			ASYNCIO_ERROR("Failed to pull worker task.\n");
 			ASYNCIO_DEBUG_CALL(2 FUNC(usleep) ARG("%d", 10000));
 			usleep(10000);
 			continue;
 		}
+
+		if (stopped)
+			break;
 
 		pthread_cleanup_push(worker_handle_cleanup, handle);
 
@@ -373,12 +378,32 @@ static void *worker_thread(void *arg)
 		pthread_cleanup_pop(1);
 	}
 
-	/* Pop and execute cleanup handler (we shouldn't ever get here, by the way...) */
-	pthread_cleanup_pop(1);
+	/* We should only get here if we stopped, so no respawn. */
+	pthread_cleanup_pop(0);
 	restore_cancelstate(oldstate);
 
 	ASYNCIO_DEBUG_RETURN(RET("%p", NULL));
 	return NULL;
+}
+
+static int stop_all_worker_tasks_locked(void)
+{
+	int rc;
+
+	ASYNCIO_DEBUG_ENTER(VOIDARG);
+	workers_initialized = 0;
+
+	/* Wake up all workers with broadcast */
+	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_cond_broadcast) ARG("%p", &workers_newtask_cond));
+	if ((rc = pthread_cond_broadcast(&workers_newtask_cond)) != 0) {
+		errno = rc;
+		ASYNCIO_SYSERROR("pthread_cond_broadcast\n");
+		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
+		return -1;
+	}
+
+	ASYNCIO_DEBUG_RETURN(RET("%d", 0));
+	return 0;
 }
 
 static int push_worker_task_locked(struct threadpool_handle *handle)
@@ -412,7 +437,7 @@ static int push_worker_task_locked(struct threadpool_handle *handle)
 	return 0;
 }
 
-static int pull_worker_task(struct worker_thread_info *worker_info, struct threadpool_handle **handlep)
+static int pull_worker_task(struct worker_thread_info *worker_info, struct threadpool_handle **handlep, int *stopped)
 {
 	struct threadpool_handle *handle;
 	int rc;
@@ -425,7 +450,7 @@ static int pull_worker_task(struct worker_thread_info *worker_info, struct threa
 		return -1;
 	}
 
-	while (queue_empty(&workers_task_queue)) {
+	while (queue_empty(&workers_task_queue) && workers_initialized) {
 		ASYNCIO_DEBUG_CALL(3 FUNC(pthread_cond_wait) ARG("%p", &workers_newtask_cond) ARG("%p", &threadpool_mtx));
 		if ((rc = pthread_cond_wait(&workers_newtask_cond, &threadpool_mtx)) != 0) {
 			errno = rc;
@@ -437,6 +462,13 @@ static int pull_worker_task(struct worker_thread_info *worker_info, struct threa
 		}
 	}
 
+	if (!workers_initialized) {
+		unlock_threadpool_mtx();
+		*stopped = 1;
+		ASYNCIO_DEBUG_RETURN(RET("%d", 0));
+		return 0;
+	}
+
 	/* Pop new task from queue (this is a misnomer... it's not pop-ing the task that was pushed like a stack) */
 	queue_pop(&workers_task_queue, &handle);
 	handle->thread = worker_info->thread;
@@ -446,6 +478,7 @@ static int pull_worker_task(struct worker_thread_info *worker_info, struct threa
 	unlock_threadpool_mtx();
 
 	*handlep = handle;
+	*stopped = 0;
 	ASYNCIO_DEBUG_RETURN(RET("%d", 0));
 	return 0;
 }
@@ -492,10 +525,7 @@ static void cleanup_threadpool_handle(struct threadpool_handle *handle)
 static void init_worker_info(struct worker_thread_info *info)
 {
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", info));
-
 	info->running = 0;
-	info->initialized = 1;
-
 	ASYNCIO_DEBUG_RETURN(VOIDRET);;
 }
 
@@ -916,5 +946,28 @@ void threadpool_release_handle(threadpool_handle_t thandle)
 
 	unlock_threadpool_mtx();
 	restore_cancelstate(oldstate);
+	ASYNCIO_DEBUG_RETURN(VOIDRET);
+}
+
+void threadpool_cleanup(void)
+{
+	ASYNCIO_DEBUG_ENTER(VOIDARG);
+
+	if (lock_threadpool_mtx() != 0) {
+		ASYNCIO_ERROR("Failed to lock threadpool mtx.\n");
+		ASYNCIO_DEBUG_RETURN(VOIDRET);
+		return;
+	}
+
+	if (!workers_initialized) {
+		unlock_threadpool_mtx();
+		ASYNCIO_DEBUG_RETURN(VOIDRET);
+		return;
+	}
+
+	if (stop_all_worker_tasks_locked() != 0)
+		ASYNCIO_ERROR("Failed to stop worker tasks.\n");
+
+	unlock_threadpool_mtx();
 	ASYNCIO_DEBUG_RETURN(VOIDRET);
 }

@@ -65,5 +65,6 @@ int main()
 		sum += counters[i];
 
 	printf("sum = %lu\n", sum);
+	threadpool_cleanup();
 	return 0;
 }

@@ -35,5 +35,6 @@ int threadpool_cancel(threadpool_handle_t handle);
 int threadpool_join(threadpool_handle_t handle);
 int threadpool_acquire_handle(threadpool_handle_t handle);
 void threadpool_release_handle(threadpool_handle_t handle);
+void threadpool_cleanup(void);
 
 #endif

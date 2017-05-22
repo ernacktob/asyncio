@@ -76,5 +76,6 @@ int main()
 
 	threadpool_release_handle(handle2);
 	threadpool_release_handle(handle);
+	threadpool_cleanup();
 	return 0;
 }

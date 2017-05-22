@@ -98,5 +98,6 @@ int main()
 		printf("Failed to join from main\n");
 
 	threadpool_release_handle(handle);
+	threadpool_cleanup();
 	return 0;
 }
