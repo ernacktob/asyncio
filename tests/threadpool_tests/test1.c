@@ -26,6 +26,7 @@ void do_stuff(void *arg)
 
 	printf_locked("do_stuff: sleeping...\n");
 	usleep(10000000);
+
 	printf_locked("do_stuff: done\n");
 }
 
@@ -65,15 +66,18 @@ int main()
 		return -1;
 	}
 
+	printf_locked("joining\n");
 	if (threadpool_join(handle) != 0)
 		printf_locked("Failed to join.\n");
 
+	printf_locked("joined handle\n");
 	if (threadpool_cancel(handle2) != 0)
 		printf_locked("Failed to cancel.\n");
 
 	if (threadpool_join(handle2) != 0)
 		printf_locked("Failed to join2\n");
 
+	printf_locked("joined handle2\n");
 	threadpool_release_handle(handle2);
 	threadpool_release_handle(handle);
 	threadpool_cleanup();
