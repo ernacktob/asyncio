@@ -35,6 +35,11 @@ int main()
 
 	srand(time(NULL));
 
+	if (threadpool_init() != 0) {
+		printf("Failed to initialize threadpool module.\n");
+		return -1;
+	}
+
 	info.flags = THREADPOOL_FLAG_NONE;
 	info.dispatch_info.fn = do_stuff;
 	info.completed_info.cb = NULL;

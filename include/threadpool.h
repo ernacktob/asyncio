@@ -30,6 +30,7 @@ struct threadpool_dispatch_info {
 	struct threadpool_callback_info cancelled_info;         /* Function to be called after dispatch_func has been cancelled. Ignored if NULL. */
 };
 
+int threadpool_init(void);
 int threadpool_dispatch(struct threadpool_dispatch_info *task, threadpool_handle_t *handlep);
 int threadpool_cancel(threadpool_handle_t handle);
 int threadpool_join(threadpool_handle_t handle);

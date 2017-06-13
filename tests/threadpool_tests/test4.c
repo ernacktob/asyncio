@@ -83,6 +83,11 @@ int main()
 
 	srand(time(NULL));
 
+	if (threadpool_init() != 0) {
+		printf("Failed to initialize threadpool module.\n");
+		return -1;
+	}
+
 	info.flags = THREADPOOL_FLAG_CANCELLABLE;
 	info.dispatch_info.fn = create_threads;
 	info.dispatch_info.arg = NULL;
@@ -91,6 +96,7 @@ int main()
 
 	if (threadpool_dispatch(&info, &handle) != 0) {
 		printf("Failed to dispatch from main!\n");
+		threadpool_cleanup();
 		return -1;
 	}
 

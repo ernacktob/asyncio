@@ -26,60 +26,60 @@
 #define queue_first(queue) \
 	((queue)->first)
 
-#define queue_push(queue, node) \
+#define queue_push(queue, links, node) \
 	do {\
 		if ((queue)->first == NULL) {\
 			(queue)->first = (queue)->last = (node);\
-			(node)->prev = (node)->next = NULL;\
+			(node)->links##_##prev = (node)->links##_##next = NULL;\
 		} else {\
-			(queue)->last->next = (node);\
-			(node)->prev = (queue)->last;\
+			(queue)->last->links##_##next = (node);\
+			(node)->links##_##prev = (queue)->last;\
 			(queue)->last = (node);\
 		}\
 		\
-		(node)->next = NULL;\
+		(node)->links##_##next = NULL;\
 		++((queue)->count);\
 	} while (0)
 
-#define queue_pop(queue, nodep) \
+#define queue_pop(queue, links, nodep) \
 	do {\
 		*(nodep) = (queue)->first;\
 		\
 		if ((queue)->first != NULL) {\
-			(queue)->first = (queue)->first->next;\
+			(queue)->first = (queue)->first->links##_##next;\
 			\
 			if ((queue)->first != NULL)\
-				(queue)->first->prev = NULL;\
+				(queue)->first->links##_##prev = NULL;\
 			else\
 				(queue)->last = NULL;\
 			\
-			(*(nodep))->next = NULL;\
+			(*(nodep))->links##_##next = NULL;\
 			--((queue)->count);\
 		}\
 	} while (0)
 
 /* Careful, this assumes the node is actually in the queue! */
-#define queue_remove(queue, node) \
+#define queue_remove(queue, links, node) \
 	do {\
-		if ((node)->prev != NULL)\
-			(node)->prev->next = (node)->next;\
-		if ((node)->next != NULL)\
-			(node)->next->prev = (node)->prev;\
+		if ((node)->links##_##prev != NULL)\
+			(node)->links##_##prev->links##_##next = (node)->links##_##next;\
+		if ((node)->links##_##next != NULL)\
+			(node)->links##_##next->links##_##prev = (node)->links##_##prev;\
 		if ((node) == (queue)->first)\
-			(queue)->first = (node)->next;\
+			(queue)->first = (node)->links##_##next;\
 		if ((node) == (queue)->last)\
-			(queue)->last = (node)->prev;\
-		(node)->prev = NULL;\
-		(node)->next = NULL;\
+			(queue)->last = (node)->links##_##prev;\
+		(node)->links##_##prev = NULL;\
+		(node)->links##_##next = NULL;\
 		--((queue)->count);\
 	} while (0)
 
-#define queue_iterate(queue, type, func) \
+#define queue_iterate(queue, links, type, func) \
 	do {\
 		void *node, *next;\
 		\
 		for (node = (queue)->first; node != NULL; node = next) {\
-			next = ((type)node)->next;\
+			next = ((type)node)->links##_##next;\
 			(func)(node);\
 		}\
 	} while (0)

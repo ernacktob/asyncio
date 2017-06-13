@@ -30,7 +30,7 @@ struct timevent_handle {
 
 	/* Things that may hold references to handle */
 	struct timevents_worker_info *worker_info;	/* worker_info refcount must take into account the handles that contain it */
-	int in_threadpool;				/* Protected by timevents_worker_mtx */
+	int has_threadpool_handle;			/* Protected by timevents_worker_mtx */
 	threadpool_handle_t threadpool_handle;		/* threadpool_handle is acquired per handle */
 
 	int finished;					/* Protected by finished_cond_mtx */
@@ -41,8 +41,8 @@ struct timevent_handle {
 	pthread_mutex_t mtx;
 
 	/* Used for timevent callback queues */
-	struct timevent_handle *prev;
-	struct timevent_handle *next;
+	struct timevent_handle *callback_queue_prev;
+	struct timevent_handle *callback_queue_next;
 };
 
 struct timevents_worker_info {
@@ -134,7 +134,7 @@ static int init_timevent_handle(struct timevent_handle *handle, const struct tim
 	handle->callback_arg = evinfo->arg;
 
 	handle->worker_info = NULL;
-	handle->in_threadpool = 0;
+	handle->has_threadpool_handle = 0;
 
 	handle->refcount = 0;
 
@@ -155,8 +155,8 @@ static int init_timevent_handle(struct timevent_handle *handle, const struct tim
 		goto error_cond_mtx;
 	}
 
-	handle->prev = NULL;
-	handle->next = NULL;
+	handle->callback_queue_prev = NULL;
+	handle->callback_queue_next = NULL;
 
 	return 0;
 
@@ -190,7 +190,7 @@ static void unlock_timevent_handle(struct timevent_handle *handle)
 
 static void cleanup_timevent_handle(struct timevent_handle *handle)
 {
-	if (handle->in_threadpool)
+	if (handle->has_threadpool_handle)
 		threadpool_release_handle(handle->threadpool_handle);
 
 	if (handle->worker_info != NULL)
@@ -365,7 +365,7 @@ static int insert_timevents_locked(struct timevents_worker_info *worker_info, st
 
 	/* The deadline is already in the database, just add handle to callback queue for that deadline */
 	if (priority_queue_lookup(&worker_info->deadlines, handle->deadline, (const void **)&cbqueue)) {
-		queue_push(cbqueue, handle);
+		queue_push(cbqueue, callback_queue, handle);
 	} else {
 		if (worker_info->ndeadlines == MAX_DEADLINES)
 			return -1;
@@ -378,7 +378,7 @@ static int insert_timevents_locked(struct timevents_worker_info *worker_info, st
 		}
 
 		queue_init(cbqueue);
-		queue_push(cbqueue, handle);
+		queue_push(cbqueue, callback_queue, handle);
 
 		++worker_info->ndeadlines;
 	}
@@ -399,7 +399,7 @@ static void remove_timevents_locked(struct timevents_worker_info *worker_info, s
 
 	last = worker_info->ndeadlines - 1;
 	index = ((unsigned char *)cbqueue - (unsigned char *)&worker_info->callbacks[0]) / sizeof *cbqueue;
-	queue_remove(cbqueue, handle);
+	queue_remove(cbqueue, callback_queue, handle);
 
 	if (queue_empty(cbqueue)) {
 		priority_queue_delete(&worker_info->deadlines, handle->deadline);
@@ -535,11 +535,6 @@ static void timevent_threadpool_cancelled(void *arg)
 
 	handle = (struct timevent_handle *)arg;
 
-	if (lock_timevents_worker_mutex() == 0) {
-		handle->in_threadpool = 0;
-		unlock_timevents_worker_mutex();
-	}
-
 	notify_timevent_handle_finished(handle);
 
 	/* Release threadpool's reference to handle */
@@ -573,11 +568,6 @@ static void execute_timevent_callback(void *arg)
 
 	restore_cancelstate(oldstate);
 	restore_canceltype(oldtype);
-
-	if (lock_timevents_worker_mutex() == 0) {
-		handle->in_threadpool = 0;
-		unlock_timevents_worker_mutex();
-	}
 
 	if (continued) {
 		/* Acquire reference for next worker dispatch. */
@@ -654,7 +644,7 @@ static void timevents_loop(void *arg)
 
 			/* Iterate through all callbacks for that deadline */
 			queue_foreach(cbqueue, handle, next) {
-				next = handle->next; /* The handle might get removed and the next pointer overwritten otherwise */
+				next = handle->callback_queue_next; /* The handle might get removed and the next pointer overwritten otherwise */
 
 				if (timevent_acquire_handle(handle) != 0) {
 					ASYNCIO_ERROR("Failed to reference timevent handle");
@@ -668,7 +658,7 @@ static void timevents_loop(void *arg)
 
 				/* XXX Ideally do not call threadpool_dispatch here because it calls malloc.
 				 * Instead, put the handle in a list and dispatch all of them after the loop,
-				 * and after unlocking the mutex. */
+				 * and after unlocking the mutex. Or use a lock-free queue? */
 				threadpool_info.flags = get_threadpool_flags(handle->flags);
 				threadpool_info.dispatch_info.fn = execute_timevent_callback;
 				threadpool_info.dispatch_info.arg = handle;
@@ -684,7 +674,7 @@ static void timevents_loop(void *arg)
 				}
 
 				handle->threadpool_handle = threadpool_handle;
-				handle->in_threadpool = 1;
+				handle->has_threadpool_handle = 1;
 
 				remove_timevents_locked(worker_info, handle);
 				handle->worker_info = NULL;
@@ -851,6 +841,7 @@ int timevent_cancel(timevent_handle_t timhandle)
 {
 	struct timevent_handle *handle;
 	int oldstate;
+	int release_worker_ref = 0;
 
 	disable_cancellations(&oldstate);
 
@@ -862,16 +853,20 @@ int timevent_cancel(timevent_handle_t timhandle)
 	}
 
 	if (handle->worker_info != NULL) {
+		/* Means it has not yet been dispatched to threadpool, so worker won't have access to handle anymore.
+		 * Note that if it was in a thread, it will have access due to the cancelled callback. */
 		remove_timevents_locked(handle->worker_info, handle);
 		wake_timevents_worker_locked(handle->worker_info);
+		release_worker_ref = 1;
 	}
 
 	unlock_timevents_worker_mutex();
 
-	/* Race conditions don't matter here. If the in_threadpool became 0 right
-	 * after this check, we can still cancel the threadpool_handle because the
-	 * threadpool_handle remains valid until we release our reference to it. */
-	if (handle->in_threadpool) {
+	/* When we took out the handle from worker's database, we need to decrement its refcount */
+	if (release_worker_ref)
+		timevent_release_handle(handle);
+
+	if (handle->has_threadpool_handle) {
 		if (threadpool_cancel(handle->threadpool_handle) != 0) {
 			ASYNCIO_ERROR("Failed to cancel threadpool handle.\n");
 			restore_cancelstate(oldstate);

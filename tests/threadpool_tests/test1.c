@@ -48,6 +48,11 @@ int main()
 	struct threadpool_dispatch_info info;
 	threadpool_handle_t handle, handle2;
 
+	if (threadpool_init() != 0) {
+		printf_locked("Failed to initialize threadpool module.\n");
+		return -1;
+	}
+
 	info.flags = THREADPOOL_FLAG_CANCELLABLE;
 	info.dispatch_info.fn = do_stuff;
 	info.dispatch_info.arg = NULL;
@@ -56,6 +61,7 @@ int main()
 
 	if (threadpool_dispatch(&info, &handle2) != 0) {
 		printf_locked("Failed to dispatch.\n");
+		threadpool_cleanup();
 		return -1;
 	}
 
@@ -63,6 +69,8 @@ int main()
 
 	if (threadpool_dispatch(&info, &handle) != 0) {
 		printf_locked("Failed to dispatch.\n");
+		threadpool_release_handle(handle2);
+		threadpool_cleanup();
 		return -1;
 	}
 

@@ -209,6 +209,12 @@ int main()
 		exit(EXIT_FAILURE);
 	}
 
+	if (fdevent_init() != 0) {
+		printf_locked("Failed to initialize fdevent module.\n");
+		close(sockfd);
+		exit(EXIT_FAILURE);
+	}
+
 	evinfo.fd = sockfd;
 	evinfo.events = FDEVENT_EVENT_READ;
 	evinfo.flags = FDEVENT_FLAG_CANCELLABLE;
@@ -217,6 +223,7 @@ int main()
 
 	if (fdevent_register(&evinfo, &handle) != 0) {
 		printf_locked("Failed to wait event.\n");
+		fdevent_cleanup();
 		close(sockfd);
 		exit(EXIT_FAILURE);
 	}
@@ -234,6 +241,7 @@ int main()
 
 	printf_locked("count = %u\n", count);
 	fdevent_release_handle(handle);
+	fdevent_cleanup();
 	close(sockfd);
 	return 0;
 }

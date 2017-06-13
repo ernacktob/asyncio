@@ -25,10 +25,12 @@ struct fdevent_info {
 
 #define fdevent_continue(continued)	(*(continued) = 1)
 
+int fdevent_init(void);
 int fdevent_register(struct fdevent_info *evinfo, fdevent_handle_t *handle);
 int fdevent_join(fdevent_handle_t handle);
 int fdevent_cancel(fdevent_handle_t handle);
 int fdevent_acquire_handle(fdevent_handle_t handle);
 void fdevent_release_handle(fdevent_handle_t handle);
+void fdevent_cleanup(void);
 
 #endif

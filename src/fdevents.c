@@ -3,6 +3,9 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
+
+#include <stdio.h>
 
 #include "fdevents.h"
 #include "threadpool.h"
@@ -20,26 +23,31 @@
 struct fdevent_handle {
 	int fd;
 	short events;
-	short revents;	/* Set by the fdevents_loop to received events */
+	short revents;					/* Set by the fdevents_loop to received events */
 	uint32_t flags;
 	fdevent_callback callback_fn;
 	void *callback_arg;
 
-	/* Things that may hold references to handle */
-	struct fdevents_worker_info *worker_info;	/* worker_info refcount must take into account the handles that contain it */
-	int in_threadpool;				/* Protected by fdevents_worker_mtx */
-	threadpool_handle_t threadpool_handle;		/* threadpool_handle is acquired per handle */
+	int in_worker_database;
+	int has_threadpool_handle;
+	threadpool_handle_t threadpool_handle;
 
-	int finished;					/* Protected by finished_cond_mtx */
+	int do_not_dispatch_got_cancelled;		/* If fdevents_cancel is called on a handle that was taken out of fdevents database and into thread dispatcher. */
+	int continued;					/* Redispatch to event loop. Is like an argument to the cancelled/completed callback, so no mutex needed. */
+
+	int finished;
 	pthread_cond_t finished_cond;
-	pthread_mutex_t finished_cond_mtx;
 
-	unsigned int refcount;				/* Protected by mtx */
-	pthread_mutex_t mtx;
+	unsigned int refcount;
 
 	/* Used for fdevent callback queues */
-	struct fdevent_handle *prev;
-	struct fdevent_handle *next;
+	/* We need to be able to put handle in multiple queues */
+	struct fdevent_handle *callback_queue_prev;
+	struct fdevent_handle *callback_queue_next;
+	struct fdevent_handle *thread_dispatcher_queue_prev;
+	struct fdevent_handle *thread_dispatcher_queue_next;
+	struct fdevent_handle *all_fdevent_handles_queue_prev;
+	struct fdevent_handle *all_fdevent_handles_queue_next;
 };
 
 struct fdevent_refcount {
@@ -55,23 +63,27 @@ struct fdevents_worker_info {
 	int changed;
 	int wakefd;
 	int clearwakefd;
-
-	unsigned int refcount;
 };
 /* END STRUCT DEFINITIONS */
 
 /* PROTOTYPES */
 static int set_nonblocking(int fd);
 
+static int lock_fdevents_mtx(void);
+static void unlock_fdevents_mtx(void);
+static void unlock_fdevents_mtx_cleanup(void *arg);
+
+static int lock_initialization_rdlock(void);
+static int lock_initialization_wrlock(void);
+static void unlock_initialization_lock(void);
+
 static int init_fdevent_handle(struct fdevent_handle *handle, const struct fdevent_info *evinfo);
-static int lock_fdevent_handle(struct fdevent_handle *handle);
-static void unlock_fdevent_handle(struct fdevent_handle *handle);
 static void cleanup_fdevent_handle(struct fdevent_handle *handle);
 static int reference_fdevent_handle_locked(struct fdevent_handle *handle);
 static void dereference_fdevent_handle_locked(struct fdevent_handle *handle);
 
-static void unlock_finished_cond_mtx(void *arg);
-static int notify_fdevent_handle_finished(struct fdevent_handle *handle);
+static void notify_fdevent_handle_finished(struct fdevent_handle *handle);
+static void fatal_error_on_handle(struct fdevent_handle *handle);
 
 static void init_fdevent_refcount_locked(struct fdevent_refcount *refcounts);
 static int increment_fdevent_refcount_locked(struct fdevent_refcount *refcounts, short events);
@@ -79,12 +91,8 @@ static void decrement_fdevent_refcount_locked(struct fdevent_refcount *refcounts
 static short get_eventsmask_from_fdevent_refcount_locked(const struct fdevent_refcount *refcounts);
 
 static int init_fdevents_worker(struct fdevents_worker_info *worker_info);
-static int acquire_fdevents_worker_locked(struct fdevents_worker_info *worker_info);
-static void release_fdevents_worker(struct fdevents_worker_info *worker_info);
 static void destroy_fdevents_worker(struct fdevents_worker_info *worker_info);
 
-static int lock_fdevents_worker_mutex(void);
-static void unlock_fdevents_worker_mutex(void);
 static int insert_fdevents_locked(struct fdevents_worker_info *worker_info, struct fdevent_handle *handle);
 static void remove_fdevents_locked(struct fdevents_worker_info *worker_info, struct fdevent_handle *handle);
 
@@ -100,20 +108,40 @@ static uint32_t get_threadpool_flags(uint32_t fdevents_flags);
 static uint16_t to_fdevents_events(short poll_events);
 static short to_poll_events(uint16_t events);
 
-static void fdevent_threadpool_cancelled(void *arg);
+static void fdevent_threadpool_completed(void *arg);
 static void execute_fdevent_callback(void *arg);
 
+static int push_dispatcher_task_locked(struct fdevent_handle *handle);
+static int pull_dispatcher_task(struct fdevent_handle **handlep, int *stopped);
+static void thread_dispatcher(void *arg);
+
 static void fdevents_loop(void *arg);
+static void stop_fdevents_worker(void);
+static void signal_stop_everything(void);
 
 static int dispatch_handle_to_loop(struct fdevent_handle *handle);
 /* END PROTOTYPES */
 
 /* GLOBALS */
+static pthread_mutex_t fdevents_mtx = PTHREAD_MUTEX_INITIALIZER;
+static volatile int fdevents_stopped = 0;
+
+static pthread_rwlock_t initialization_lock = PTHREAD_RWLOCK_INITIALIZER;
+static volatile int fdevents_initialized = 0;
+
+static threadpool_handle_t thread_dispatcher_threadpool_handle;
+static pthread_cond_t thread_dispatcher_cond = PTHREAD_COND_INITIALIZER;
+static decl_queue(struct fdevent_handle, thread_dispatcher_queue);
+
+/* A global list of all handles for cleanup */
+static decl_queue(struct fdevent_handle, all_fdevent_handles_queue);
+
+/* NOTE: Whenever there is a fdevent_release_handle in this module, handle must also be removed from the all_fdevent_handles_queue.
+ * We do this in the notify_fdevent_handle_finished, which basically ends the handle's lifecycle through the fdevent module. */
+
 /* For now use only one worker... */
 static threadpool_handle_t fdevents_worker_threadpool_handle;
 static struct fdevents_worker_info fdevents_global_worker_info;
-static pthread_mutex_t fdevents_worker_mtx = PTHREAD_MUTEX_INITIALIZER;
-static int worker_initialized = 0;
 /* END GLOBALS */
 
 static int set_nonblocking(int fd)
@@ -130,57 +158,12 @@ static int set_nonblocking(int fd)
 	return 0;
 }
 
-static int init_fdevent_handle(struct fdevent_handle *handle, const struct fdevent_info *evinfo)
+static int lock_fdevents_mtx()
 {
-	handle->fd = evinfo->fd;
-	handle->events = to_poll_events(evinfo->events);
-	handle->revents = 0;
-	handle->flags = evinfo->flags;
-	handle->callback_fn = evinfo->cb;
-	handle->callback_arg = evinfo->arg;
+	int rc;
 
-	handle->worker_info = NULL;
-	handle->in_threadpool = 0;
-
-	handle->refcount = 0;
-
-	if (pthread_mutex_init(&handle->mtx, NULL) != 0) {
-		ASYNCIO_SYSERROR("pthread_mutex_init");
-		goto error;
-	}
-
-	handle->finished = 0;
-
-	if (pthread_mutex_init(&handle->finished_cond_mtx, NULL) != 0) {
-		ASYNCIO_SYSERROR("pthread_mutex_init");
-		goto error_mtx;
-	}
-
-	if (pthread_cond_init(&handle->finished_cond, NULL) != 0) {
-		ASYNCIO_SYSERROR("pthread_cond_init");
-		goto error_cond_mtx;
-	}
-
-	handle->prev = NULL;
-	handle->next = NULL;
-
-	return 0;
-
-error_cond_mtx:
-	if (pthread_mutex_destroy(&handle->finished_cond_mtx) != 0)
-		ASYNCIO_SYSERROR("pthread_mutex_destroy");
-
-error_mtx:
-	if (pthread_mutex_destroy(&handle->mtx) != 0)
-		ASYNCIO_SYSERROR("pthread_mutex_destroy");
-
-error:
-	return -1;
-}
-
-static int lock_fdevent_handle(struct fdevent_handle *handle)
-{
-	if (pthread_mutex_lock(&handle->mtx) != 0) {
+	if ((rc = pthread_mutex_lock(&fdevents_mtx)) != 0) {
+		errno = rc;
 		ASYNCIO_SYSERROR("pthread_mutex_lock");
 		return -1;
 	}
@@ -188,34 +171,103 @@ static int lock_fdevent_handle(struct fdevent_handle *handle)
 	return 0;
 }
 
-static void unlock_fdevent_handle(struct fdevent_handle *handle)
+static void unlock_fdevents_mtx()
 {
-	if (pthread_mutex_unlock(&handle->mtx) != 0)
+	int rc;
+
+	if ((rc = pthread_mutex_unlock(&fdevents_mtx)) != 0) {
+		errno = rc;
 		ASYNCIO_SYSERROR("pthread_mutex_unlock");
+	}
+}
+
+static void unlock_fdevents_mtx_cleanup(void *arg)
+{
+	(void)arg;
+	unlock_fdevents_mtx();
+}
+
+static int lock_initialization_rdlock()
+{
+	int rc;
+
+	if ((rc = pthread_rwlock_rdlock(&initialization_lock)) != 0) {
+		errno = rc;
+		ASYNCIO_SYSERROR("pthread_rwlock_rdlock");
+		return -1;
+	}
+
+	return 0;
+}
+
+static int lock_initialization_wrlock()
+{
+	int rc;
+
+	if ((rc = pthread_rwlock_wrlock(&initialization_lock)) != 0) {
+		errno = rc;
+		ASYNCIO_SYSERROR("pthread_rwlock_wrlock");
+		return -1;
+	}
+
+	return 0;
+}
+
+static void unlock_initialization_lock()
+{
+	int rc;
+
+	if ((rc = pthread_rwlock_unlock(&initialization_lock)) != 0) {
+		errno = rc;
+		ASYNCIO_SYSERROR("pthread_rwlock_unlock");
+	}
+}
+
+static int init_fdevent_handle(struct fdevent_handle *handle, const struct fdevent_info *evinfo)
+{
+	int rc;
+
+	handle->fd = evinfo->fd;
+	handle->events = to_poll_events(evinfo->events);
+	handle->revents = 0;
+	handle->flags = evinfo->flags;
+	handle->callback_fn = evinfo->cb;
+	handle->callback_arg = evinfo->arg;
+
+	handle->in_worker_database = 0;
+	handle->has_threadpool_handle = 0;
+
+	handle->do_not_dispatch_got_cancelled = 0;
+	handle->continued = 0;
+
+	handle->refcount = 0;
+	handle->finished = 0;
+
+	if ((rc = pthread_cond_init(&handle->finished_cond, NULL)) != 0) {
+		errno = rc;
+		ASYNCIO_SYSERROR("pthread_cond_init");
+		return -1;
+	}
+
+	return 0;
 }
 
 static void cleanup_fdevent_handle(struct fdevent_handle *handle)
 {
-	if (handle->in_threadpool)
-		threadpool_release_handle(handle->threadpool_handle);
+	int rc;
 
-	if (handle->worker_info != NULL)
-		release_fdevents_worker(handle->worker_info);
-
-	if (pthread_cond_destroy(&handle->finished_cond) != 0)
+	if ((rc = pthread_cond_destroy(&handle->finished_cond)) != 0) {
+		errno = rc;
 		ASYNCIO_SYSERROR("pthread_cond_destroy");
-
-	if (pthread_mutex_destroy(&handle->finished_cond_mtx) != 0)
-		ASYNCIO_SYSERROR("pthread_mutex_destroy");
-
-	if (pthread_mutex_destroy(&handle->mtx) != 0)
-		ASYNCIO_SYSERROR("pthread_mutex_destroy");
+	}
 }
 
 static int reference_fdevent_handle_locked(struct fdevent_handle *handle)
 {
-	if (handle->refcount == UINT_MAX)
+	if (handle->refcount == UINT_MAX) {
+		ASYNCIO_ERROR("Reached maximum refcount for handle.");
 		return -1;
+	}
 
 	++(handle->refcount);
 	return 0;
@@ -232,38 +284,42 @@ static void dereference_fdevent_handle_locked(struct fdevent_handle *handle)
 	--(handle->refcount);
 }
 
-static void unlock_finished_cond_mtx(void *arg)
+static void notify_fdevent_handle_finished(struct fdevent_handle *handle)
 {
-	struct fdevent_handle *handle;
+	int rc;
 
-	handle = (struct fdevent_handle *)arg;
+	/* This function is responsible for ending the handle life cycle through the fdevent module.
+	 * A reference may still be held by users, but it stops existing as far as this module is concerned. */
 
-	if (pthread_mutex_unlock(&handle->finished_cond_mtx) != 0)
-		ASYNCIO_SYSERROR("pthread_mutex_unlock");
+	printf("Notifying.\n");
+	if (lock_fdevents_mtx() == 0) {
+		queue_remove(&all_fdevent_handles_queue, all_fdevent_handles_queue, handle);
+		handle->finished = 1;
+
+		/* Yes, other threads may still try to call fdevent_cancel, but that function
+		 * will know not to touch the threadpool handle since we clear the has_threadpool_handle flag. */
+		if (handle->has_threadpool_handle) {
+			threadpool_release_handle(handle->threadpool_handle);
+			handle->has_threadpool_handle = 0;
+		}
+
+		if ((rc = pthread_cond_broadcast(&handle->finished_cond)) != 0) {
+			errno = rc;
+			ASYNCIO_SYSERROR("pthread_cond_broadcast");
+		}
+
+		unlock_fdevents_mtx();
+	} else {
+		ASYNCIO_ERROR("Failed to lock fdevents mtx.\n");
+	}
+
+	fdevent_release_handle(handle);
 }
 
-static int notify_fdevent_handle_finished(struct fdevent_handle *handle)
+static void fatal_error_on_handle(struct fdevent_handle *handle)
 {
-	if (pthread_mutex_lock(&handle->finished_cond_mtx) != 0) {
-		ASYNCIO_SYSERROR("pthread_mutex_lock");
-		return -1;
-	}
-
-	handle->finished = 1;
-
-	if (pthread_cond_broadcast(&handle->finished_cond) != 0) {
-		ASYNCIO_SYSERROR("pthread_cond_broadcast");
-
-		if (pthread_mutex_unlock(&handle->finished_cond_mtx) != 0)
-			ASYNCIO_SYSERROR("pthread_mutex_unlock");
-
-		return -1;
-	}
-
-	if (pthread_mutex_unlock(&handle->finished_cond_mtx) != 0)
-		ASYNCIO_SYSERROR("pthread_mutex_unlock");
-
-	return 0;
+	/* TODO: add error conditions? */
+	notify_fdevent_handle_finished(handle);
 }
 
 static void init_fdevent_refcount_locked(struct fdevent_refcount *refcounts)
@@ -284,8 +340,10 @@ static int increment_fdevent_refcount_locked(struct fdevent_refcount *refcounts,
 
 	/* First check that we can increment without overflows */
 	for (i = 0; i < POLLFD_EVENT_NBITS; i++) {
-		if ((events & (1 << i)) && (refcounts->bitcounts[i] == UINT_MAX))
+		if ((events & (1 << i)) && (refcounts->bitcounts[i] == UINT_MAX)) {
+			ASYNCIO_ERROR("Reached maximum count for fdevent refcounts.\n");
 			return -1;
+		}
 	}
 
 	for (i = 0; i < POLLFD_EVENT_NBITS; i++) {
@@ -362,7 +420,6 @@ static int init_fdevents_worker(struct fdevents_worker_info *worker_info)
 	worker_info->changed = 0;
 	worker_info->wakefd = pipefds[1];
 	worker_info->clearwakefd = pipefds[0];
-	worker_info->refcount = 0;
 
 	return 0;
 
@@ -380,40 +437,6 @@ error:
 	return -1;
 }
 
-static int acquire_fdevents_worker_locked(struct fdevents_worker_info *worker_info)
-{
-	if (worker_info->refcount == UINT_MAX) {
-		ASYNCIO_ERROR("worker_info refcount reached maximal value.\n");
-		return -1;
-	}
-
-	++worker_info->refcount;
-	return 0;
-}
-
-static void release_fdevents_worker(struct fdevents_worker_info *worker_info)
-{
-	if (lock_fdevents_worker_mutex() != 0)
-		return;
-
-	if (worker_info->refcount == 0) {
-		ASYNCIO_ERROR("worker_info refcount 0 before decrement.\n");
-		unlock_fdevents_worker_mutex();
-		return;
-	}
-
-	--worker_info->refcount;
-
-	if (worker_info->refcount == 0) {
-		unlock_fdevents_worker_mutex();
-		destroy_fdevents_worker(worker_info);
-		/* safe_free(worker_info); // don't do it because it's in the stack */
-		return;
-	}
-
-	unlock_fdevents_worker_mutex();
-}
-
 static void destroy_fdevents_worker(struct fdevents_worker_info *worker_info)
 {
 	if (close(worker_info->wakefd) != 0)
@@ -423,22 +446,6 @@ static void destroy_fdevents_worker(struct fdevents_worker_info *worker_info)
 		ASYNCIO_SYSERROR("close");
 
 	hashtable_destroy(&worker_info->fd_map);
-}
-
-static int lock_fdevents_worker_mutex()
-{
-	if (pthread_mutex_lock(&fdevents_worker_mtx) != 0) {
-		ASYNCIO_SYSERROR("pthread_mutex_lock");
-		return -1;
-	}
-
-	return 0;
-}
-
-static void unlock_fdevents_worker_mutex()
-{
-	if (pthread_mutex_unlock(&fdevents_worker_mtx) != 0)
-		ASYNCIO_SYSERROR("pthread_mutex_unlock");
 }
 
 static int insert_fdevents_locked(struct fdevents_worker_info *worker_info, struct fdevent_handle *handle)
@@ -454,11 +461,13 @@ static int insert_fdevents_locked(struct fdevents_worker_info *worker_info, stru
 		if (increment_fdevent_refcount_locked(&worker_info->fdevent_refcounts[index], handle->events) != 0)
 			return -1;
 
-		queue_push(cbqueue, handle);
+		queue_push(cbqueue, callback_queue, handle);
 		worker_info->fds[index].events |= handle->events;
 	} else {
-		if (worker_info->nfds == MAX_POLLFDS)
+		if (worker_info->nfds == MAX_POLLFDS) {
+			ASYNCIO_ERROR("Worker nfds reached MAX_POLLFDS.\n");
 			return -1;
+		}
 
 		cbqueue = (void *)&worker_info->callbacks[worker_info->nfds];
 
@@ -476,7 +485,7 @@ static int insert_fdevents_locked(struct fdevents_worker_info *worker_info, stru
 		}
 
 		queue_init(cbqueue);
-		queue_push(cbqueue, handle);
+		queue_push(cbqueue, callback_queue, handle);
 
 		worker_info->fds[worker_info->nfds].fd = handle->fd;
 		worker_info->fds[worker_info->nfds].events = handle->events;
@@ -500,7 +509,7 @@ static void remove_fdevents_locked(struct fdevents_worker_info *worker_info, str
 	last = worker_info->nfds - 1;
 	index = ((unsigned char *)cbqueue - (unsigned char *)&worker_info->callbacks[0]) / sizeof *cbqueue;
 	decrement_fdevent_refcount_locked(&worker_info->fdevent_refcounts[index], handle->events);
-	queue_remove(cbqueue, handle);
+	queue_remove(cbqueue, callback_queue, handle);
 
 	if (queue_empty(cbqueue)) {
 		hashtable_delete(&worker_info->fd_map, sizeof handle->fd, &handle->fd);
@@ -540,6 +549,7 @@ static int set_changed_fdevents_locked(struct fdevents_worker_info *worker_info)
 
 	worker_info->changed = 1;
 
+	/* Avoid possible && side-effects */
 	if (wake) {
 		if (wake_fdevents_worker_locked(worker_info) != 0)
 			return -1;
@@ -627,22 +637,43 @@ static short to_poll_events(uint16_t events)
 	return poll_events;
 }
 
-static void fdevent_threadpool_cancelled(void *arg)
+static void fdevent_threadpool_completed(void *arg)
 {
 	struct fdevent_handle *handle;
 
 	handle = (struct fdevent_handle *)arg;
 
-	if (lock_fdevents_worker_mutex() == 0) {
-		handle->in_threadpool = 0;
-		unlock_fdevents_worker_mutex();
+	/* TODO: More fine grained lock? */
+	if (lock_fdevents_mtx() != 0) {
+		ASYNCIO_ERROR("Failed to lock fdevents mtx.\n");
+		fatal_error_on_handle(handle);
+		return;
 	}
 
-	/* If cancelled we don't care if continued was set */
-	notify_fdevent_handle_finished(handle);
+	/* No danger of double release of handle (in notify_fdevent_handle_finished)
+	 * because it checks whether there actually is a threadpool handle.
+	 * But the point is that we want to release the old threadpool handle even if
+	 * the fdevent handle's lifecycle is not done, in case it is continued. */
+	threadpool_release_handle(handle->threadpool_handle);
+	handle->has_threadpool_handle = 0;
 
-	/* Release threadpool's reference to handle */
-	fdevent_release_handle(handle);
+	if (handle->continued) {
+		handle->continued = 0;
+
+		if (insert_fdevents_locked(&fdevents_global_worker_info, handle) != 0) {
+			ASYNCIO_ERROR("Failed to re-dispatch handle to loop.\n");
+			unlock_fdevents_mtx();
+			fatal_error_on_handle(handle);
+			return;
+		}
+
+		handle->in_worker_database = 1;
+		set_changed_fdevents_locked(&fdevents_global_worker_info);
+		unlock_fdevents_mtx();
+	} else {
+		unlock_fdevents_mtx();
+		notify_fdevent_handle_finished(handle);
+	}
 }
 
 static void execute_fdevent_callback(void *arg)
@@ -672,75 +703,157 @@ static void execute_fdevent_callback(void *arg)
 	restore_cancelstate(oldstate);
 	restore_canceltype(oldtype);
 
-	if (lock_fdevents_worker_mutex() == 0) {
-		handle->in_threadpool = 0;
-		unlock_fdevents_worker_mutex();
+	handle->continued = continued;
+}
+
+static int push_dispatcher_task_locked(struct fdevent_handle *handle)
+{
+	int rc;
+
+	queue_push(&thread_dispatcher_queue, thread_dispatcher_queue, handle);
+
+	if ((rc = pthread_cond_signal(&thread_dispatcher_cond)) != 0) {
+		errno = rc;
+		ASYNCIO_SYSERROR("pthread_cond_signal");
+		queue_remove(&thread_dispatcher_queue, thread_dispatcher_queue, handle);
+		return -1;
 	}
 
-	if (continued) {
-		/* Acquire reference for next worker dispatch. */
-		if (fdevent_acquire_handle(handle) == 0) {
-			if (dispatch_handle_to_loop(handle) != 0) {
-				ASYNCIO_ERROR("Failed to redispatch handle for continue.\n");
-				fdevent_release_handle(handle);
-			}
-		} else {
-			ASYNCIO_ERROR("Failed to acquire handle for continue.\n");
+	return 0;
+}
+
+static int pull_dispatcher_task(struct fdevent_handle **handlep, int *stopped)
+{
+	struct fdevent_handle *handle;
+	int rc;
+
+	if (lock_fdevents_mtx() != 0) {
+		ASYNCIO_ERROR("Failed to lock fdevents mtx.\n");
+		return -1;
+	}
+
+	while (queue_empty(&thread_dispatcher_queue) && !fdevents_stopped) {
+		if ((rc = pthread_cond_wait(&thread_dispatcher_cond, &fdevents_mtx)) != 0) {
+			errno = rc;
+			ASYNCIO_SYSERROR("pthread_cond_wait");
+			unlock_fdevents_mtx();
+			return -1;
 		}
-	} else {
-		notify_fdevent_handle_finished(handle);
 	}
 
-	/* Release threadpool's reference to handle */
-	fdevent_release_handle(handle);
+	if (fdevents_stopped) {
+		unlock_fdevents_mtx();
+		*stopped = 1;
+		return 0;
+	}
+
+	/* Pop new task from queue (this is a misnomer... it's not pop-ing the task that was pushed like a stack) */
+	queue_pop(&thread_dispatcher_queue, thread_dispatcher_queue, &handle);
+	unlock_fdevents_mtx();
+
+	*handlep = handle;
+	*stopped = 0;
+	return 0;
+}
+
+static void thread_dispatcher(void *arg)
+{
+	struct fdevent_handle *handle;
+	struct threadpool_dispatch_info info;
+	threadpool_handle_t threadpool_handle;
+	int stopped;
+	(void)arg;
+
+	for (;;) {
+		if (pull_dispatcher_task(&handle, &stopped) != 0) {
+			ASYNCIO_ERROR("Failed to pull dispatcher task.\n");
+			usleep(10000);
+			continue;
+		}
+
+		if (stopped)
+			break;
+
+		/* TODO Maybe use a finer grained lock? */
+		if (lock_fdevents_mtx() != 0) {
+			ASYNCIO_ERROR("Failed to lock fdevents mtx.\n");
+			fatal_error_on_handle(handle);
+			continue;
+		}
+
+		if (handle->do_not_dispatch_got_cancelled) {
+			unlock_fdevents_mtx();
+			notify_fdevent_handle_finished(handle);
+			continue;
+		}
+
+		info.flags = get_threadpool_flags(handle->flags);
+		info.dispatch_info.fn = execute_fdevent_callback;
+		info.dispatch_info.arg = handle;
+		info.completed_info.cb = fdevent_threadpool_completed;
+		info.completed_info.arg = handle;
+		info.cancelled_info.cb = fdevent_threadpool_completed;
+		info.cancelled_info.arg = handle;
+
+		if (threadpool_dispatch(&info, &threadpool_handle) != 0) {
+			ASYNCIO_ERROR("Failed to dispatch fdevent handle to threadpool.\n");
+			unlock_fdevents_mtx();
+			fatal_error_on_handle(handle);
+			continue;
+		}
+
+		handle->threadpool_handle = threadpool_handle;
+		handle->has_threadpool_handle = 1;
+		unlock_fdevents_mtx();
+	}
 }
 
 static void fdevents_loop(void *arg)
 {
-	threadpool_handle_t threadpool_handle, next;
-	struct threadpool_dispatch_info threadpool_info;
 	struct fdevents_worker_info *worker_info;
-	struct fdevent_handle *handle;
+	struct fdevent_handle *handle, *next;
 	struct pollfd fds[MAX_POLLFDS];
 	nfds_t nfds;
 	nfds_t i;
 
-	worker_info = (struct fdevents_worker_info *)arg;
-
-	if (lock_fdevents_worker_mutex() != 0) {
-		ASYNCIO_ERROR("Failed to lock workers mutex.\n");
-		release_fdevents_worker(worker_info);
+	if (lock_fdevents_mtx() != 0) {
+		ASYNCIO_ERROR("Failed to lock fdevents mtx.\n");
 		return;
 	}
 
+	worker_info = (struct fdevents_worker_info *)arg;
 	copy_fdevents_locked(worker_info, fds, &nfds);
-	unlock_fdevents_worker_mutex();
+	unlock_fdevents_mtx();
 
 	for (;;) {
 		if (poll(fds, nfds, -1) < 0) {
 			ASYNCIO_SYSERROR("poll");
-			release_fdevents_worker(worker_info);
 			break;
 		}
 
-		if (lock_fdevents_worker_mutex() != 0) {
-			ASYNCIO_ERROR("Failed to lock workers mutex.\n");
-			release_fdevents_worker(worker_info);
+		if (lock_fdevents_mtx() != 0) {
+			ASYNCIO_ERROR("Failed to lock fdevents mtx.\n");
 			break;
 		}
 
+		/* Stop condition for fdevents loop. */
+		if (fdevents_stopped) {
+			unlock_fdevents_mtx();
+			break;
+		}
+
+		/* Check if event database has changed. */
 		if (has_changed_fdevents_locked(worker_info)) {
 			copy_fdevents_locked(worker_info, fds, &nfds);
 
 			if (clearwake_fdevents_worker_locked(worker_info) != 0) {
 				ASYNCIO_ERROR("Failed to clear wake event.\n");
-				unlock_fdevents_worker_mutex();
-				release_fdevents_worker(worker_info);
+				unlock_fdevents_mtx();
 				break;
 			}
 
 			clear_changed_fdevents_locked(worker_info);
-			unlock_fdevents_worker_mutex();
+			unlock_fdevents_mtx();
 			continue;
 		}
 
@@ -748,14 +861,9 @@ static void fdevents_loop(void *arg)
 		for (i = 0; i < nfds; i++) {
 			if (fds[i].revents & (fds[i].events | POLLERR | POLLHUP | POLLNVAL)) {
 				queue_foreach(&worker_info->callbacks[i], handle, next) {
-					next = handle->next; /* The handle might get removed and the next pointer overwritten otherwise */
+					next = handle->callback_queue_next; /* The handle might get removed and the next pointer overwritten otherwise */
 
 					if (fds[i].revents & (handle->events | POLLERR | POLLHUP | POLLNVAL)) {
-						/* First pass (locked): just make a copy of the callback queues */
-						/* Second pass (unlocked): with the copies, actually process and dispatch threadpool, etc. */
-						/* Could use different links for next and prev in the copy, to avoid overwriting ->next and ->prev,
-						 * allowing us to only store those that are actually fired off events */
-
 						/* At this point the handle refcount is at least 2:
 						 * - the client thread that got the handle
 						 * - the fdevents_loop worker */
@@ -763,30 +871,15 @@ static void fdevents_loop(void *arg)
 						/* The callback queues are owned by the fdevents_loop, this is the only
 						 * thread that is allowed to remove handles from queues. It should not
 						 * be done during an fdevent_release_handle */
-
-						/* XXX Ideally do not call threadpool_dispatch here because it calls malloc.
-						 * Instead, put the handle in a list and dispatch all of them after the loop,
-						 * and after unlocking the mutex. */
-						threadpool_info.flags = get_threadpool_flags(handle->flags);
-						threadpool_info.dispatch_info.fn = execute_fdevent_callback;
-						threadpool_info.dispatch_info.arg = handle;
-						threadpool_info.completed_info.cb = NULL;
-						threadpool_info.completed_info.arg = NULL;
-						threadpool_info.cancelled_info.cb = fdevent_threadpool_cancelled;
-						threadpool_info.cancelled_info.arg = handle;
-
-						if (threadpool_dispatch(&threadpool_info, &threadpool_handle) != 0) {
-							ASYNCIO_ERROR("Failed to dispatch fdevent handle to threadpool.\n");
-							fdevent_release_handle(handle); /* threadpool won't have the handle after all... */
-							continue;
-						}
-
 						handle->revents = fds[i].revents;
-						handle->threadpool_handle = threadpool_handle;
-						handle->in_threadpool = 1;
 
-						remove_fdevents_locked(worker_info, handle);
-						handle->worker_info = NULL;
+						/* Send to thread dispatcher. Don't remove from worker database if it failed. */
+						if (push_dispatcher_task_locked(handle) == 0) {
+							remove_fdevents_locked(worker_info, handle);
+							handle->in_worker_database = 0;
+						} else {
+							ASYNCIO_ERROR("Failed to push task to thread dispatcher.\n");
+						}
 					}
 				}
 			}
@@ -795,61 +888,147 @@ static void fdevents_loop(void *arg)
 		/* The masked fds must be removed from the local fds array because poll
 		 * will return on exceptions even when events is 0. */
 		copy_fdevents_locked(worker_info, fds, &nfds);
-		unlock_fdevents_worker_mutex();
+		unlock_fdevents_mtx();
 	}
+}
+
+static void stop_fdevents_worker()
+{
+	signal_stop_everything();
+
+	if (threadpool_join(fdevents_worker_threadpool_handle) != 0)
+		ASYNCIO_ERROR("Failed to join fdevents_worker_threadpool_handle.\n");
+}
+
+static void signal_stop_everything()
+{
+	int rc;
+
+	if (lock_fdevents_mtx() != 0) {
+		ASYNCIO_ERROR("Failed to lock fdevents mtx.\n");
+		return;
+	}
+
+	fdevents_stopped = 1;
+
+	if (wake_fdevents_worker_locked(&fdevents_global_worker_info) != 0)
+		ASYNCIO_ERROR("Failed to wake fdevents worker.\n");
+
+	if ((rc = pthread_cond_signal(&thread_dispatcher_cond)) != 0) {
+		errno = rc;
+		ASYNCIO_SYSERROR("pthread_cond_signal");
+	}
+
+	unlock_fdevents_mtx();
 }
 
 static int dispatch_handle_to_loop(struct fdevent_handle *handle)
 {
-	struct threadpool_dispatch_info fdevents_task;
-
-	if (lock_fdevents_worker_mutex() != 0)
+	if (lock_fdevents_mtx() != 0) {
+		ASYNCIO_ERROR("Failed to lock fdevents mtx.\n");
 		return -1;
-
-	if (!worker_initialized) {
-		if (init_fdevents_worker(&fdevents_global_worker_info) != 0) {
-			unlock_fdevents_worker_mutex();
-			return -1;
-		}
-
-		/* One reference held by the fdevents_loop */
-		fdevents_global_worker_info.refcount = 1;
-
-		fdevents_task.flags = THREADPOOL_FLAG_CONTRACTOR;
-		fdevents_task.dispatch_info.fn = fdevents_loop;
-		fdevents_task.dispatch_info.arg = &fdevents_global_worker_info;
-		fdevents_task.completed_info.cb = NULL;
-		fdevents_task.completed_info.arg = NULL;
-		fdevents_task.cancelled_info.cb = NULL;
-		fdevents_task.cancelled_info.arg = NULL;
-
-		if (threadpool_dispatch(&fdevents_task, &fdevents_worker_threadpool_handle) != 0) {
-			ASYNCIO_ERROR("Failed to dispatch fdevents loop.\n");
-			destroy_fdevents_worker(&fdevents_global_worker_info);
-			unlock_fdevents_worker_mutex();
-			return -1;
-		}
-
-		worker_initialized = 1;
 	}
 
 	if (insert_fdevents_locked(&fdevents_global_worker_info, handle) != 0) {
-		unlock_fdevents_worker_mutex();
+		unlock_fdevents_mtx();
 		return -1;
 	}
 
-	/* Acquire reference to worker_info in handle */
-	if (acquire_fdevents_worker_locked(&fdevents_global_worker_info) != 0) {
-		remove_fdevents_locked(&fdevents_global_worker_info, handle);
-		unlock_fdevents_worker_mutex();
-		return -1;
-	}
-
-	handle->worker_info = &fdevents_global_worker_info;
-
+	handle->in_worker_database = 1;
 	set_changed_fdevents_locked(&fdevents_global_worker_info);
 
-	unlock_fdevents_worker_mutex();
+	queue_push(&all_fdevent_handles_queue, all_fdevent_handles_queue, handle);
+
+	unlock_fdevents_mtx();
+	return 0;
+}
+
+int fdevent_init()
+{
+	struct threadpool_dispatch_info fdevents_task;
+	int oldstate;
+
+	disable_cancellations(&oldstate);
+
+	if (lock_initialization_wrlock() != 0) {
+		ASYNCIO_ERROR("Failed to lock initialization wrlock.\n");
+		restore_cancelstate(oldstate);
+		return -1;
+	}
+
+	if (lock_fdevents_mtx() != 0) {
+		ASYNCIO_ERROR("Failed to lock fdevents mtx.\n");
+		unlock_initialization_lock();
+		restore_cancelstate(oldstate);
+		return -1;
+	}
+
+	if (fdevents_initialized) {
+		unlock_fdevents_mtx();
+		unlock_initialization_lock();
+		restore_cancelstate(oldstate);
+		return 0;
+	}
+
+	if (threadpool_init() != 0) {
+		ASYNCIO_ERROR("Failed to initialize threadpool module.\n");
+		unlock_fdevents_mtx();
+		unlock_initialization_lock();
+		restore_cancelstate(oldstate);
+		return -1;
+	}
+
+	if (init_fdevents_worker(&fdevents_global_worker_info) != 0) {
+		ASYNCIO_ERROR("Failed to initialize fdevents worker.\n");
+		threadpool_cleanup();
+		unlock_fdevents_mtx();
+		unlock_initialization_lock();
+		restore_cancelstate(oldstate);
+		return -1;
+	}
+
+	fdevents_task.flags = THREADPOOL_FLAG_CONTRACTOR;
+	fdevents_task.dispatch_info.fn = fdevents_loop;
+	fdevents_task.dispatch_info.arg = &fdevents_global_worker_info;
+	fdevents_task.completed_info.cb = NULL;
+	fdevents_task.completed_info.arg = NULL;
+	fdevents_task.cancelled_info.cb = NULL;
+	fdevents_task.cancelled_info.arg = NULL;
+
+	if (threadpool_dispatch(&fdevents_task, &fdevents_worker_threadpool_handle) != 0) {
+		ASYNCIO_ERROR("Failed to dispatch fdevents loop.\n");
+		destroy_fdevents_worker(&fdevents_global_worker_info);
+		threadpool_cleanup();
+		unlock_fdevents_mtx();
+		unlock_initialization_lock();
+		restore_cancelstate(oldstate);
+		return -1;
+	}
+
+	fdevents_task.dispatch_info.fn = thread_dispatcher;
+	fdevents_task.dispatch_info.arg = NULL;
+
+	if (threadpool_dispatch(&fdevents_task, &thread_dispatcher_threadpool_handle) != 0) {
+		ASYNCIO_ERROR("Failed to dispatch thread dispatcher.\n");
+		unlock_fdevents_mtx();
+		stop_fdevents_worker();
+		threadpool_release_handle(fdevents_worker_threadpool_handle);
+		destroy_fdevents_worker(&fdevents_global_worker_info);
+		threadpool_cleanup();
+		unlock_initialization_lock();
+		restore_cancelstate(oldstate);
+		return -1;
+	}
+
+	queue_init(&all_fdevent_handles_queue);
+	queue_init(&thread_dispatcher_queue);
+
+	fdevents_stopped = 0;
+	fdevents_initialized = 1;
+
+	unlock_fdevents_mtx();
+	unlock_initialization_lock();
+	restore_cancelstate(oldstate);
 	return 0;
 }
 
@@ -860,12 +1039,26 @@ int fdevent_register(struct fdevent_info *evinfo, fdevent_handle_t *fdhandle)
 
 	disable_cancellations(&oldstate);
 
+	if (lock_initialization_rdlock() != 0) {
+		ASYNCIO_ERROR("Failed to lock initialization rdlock.\n");
+		restore_cancelstate(oldstate);
+		return -1;
+	}
+
+	if (!fdevents_initialized) {
+		unlock_initialization_lock();
+		restore_cancelstate(oldstate);
+		return -1;
+	}
+
 	if (evinfo->cb == NULL) {
+		unlock_initialization_lock();
 		restore_cancelstate(oldstate);
 		return -1;
 	}
 
 	if (set_nonblocking(evinfo->fd) != 0) {
+		unlock_initialization_lock();
 		restore_cancelstate(oldstate);
 		return -1;
 	}
@@ -873,12 +1066,14 @@ int fdevent_register(struct fdevent_info *evinfo, fdevent_handle_t *fdhandle)
 	handle = safe_malloc(sizeof *handle);
 
 	if (handle == NULL) {
+		unlock_initialization_lock();
 		restore_cancelstate(oldstate);
 		return -1;
 	}
 
 	if (init_fdevent_handle(handle, evinfo) != 0) {
 		safe_free(handle);
+		unlock_initialization_lock();
 		restore_cancelstate(oldstate);
 		return -1;
 	}
@@ -893,9 +1088,12 @@ int fdevent_register(struct fdevent_info *evinfo, fdevent_handle_t *fdhandle)
 	if (dispatch_handle_to_loop(handle) != 0) {
 		cleanup_fdevent_handle(handle);
 		safe_free(handle);
+		unlock_initialization_lock();
 		restore_cancelstate(oldstate);
 		return -1;
 	}
+
+	unlock_initialization_lock();
 
 	*fdhandle = handle;
 	restore_cancelstate(oldstate);
@@ -907,34 +1105,34 @@ int fdevent_join(fdevent_handle_t fdhandle)
 	struct fdevent_handle *handle;
 	int oldstate;
 	int oldtype;
+	int success = 1;
 	int rc;
 
 	disable_cancellations(&oldstate);
 
-	handle = (struct fdevent_handle *)fdhandle;
-
-	if (pthread_mutex_lock(&handle->finished_cond_mtx) != 0) {
-		ASYNCIO_SYSERROR("pthread_mutex_lock");
+	if (lock_fdevents_mtx() != 0) {
+		ASYNCIO_ERROR("Failed to lock fdevents mtx.\n");
 		restore_cancelstate(oldstate);
 		return -1;
 	}
 
-	/* Unlock the finished_cond_mtx in cleanup handler if cancelled here */
-	pthread_cleanup_push(unlock_finished_cond_mtx, handle);
+	handle = (struct fdevent_handle *)fdhandle;
+
+	/* Unlock the fdevents_mtx in cleanup handler if cancelled here */
+	pthread_cleanup_push(unlock_fdevents_mtx_cleanup, NULL);
 
 	/* Restore cancelstate while waiting for condition variable
 	 * to allow cancellation in this case. But set cancellation type to DEFERRED
 	 * in order to make sure we cancel during pthread_cond_wait, which should guarantee
-	 * that the finished_cond_mtx is locked during the cleanup handler. */
+	 * that the fdevents_mtx is locked during the cleanup handler. */
 	set_canceltype(PTHREAD_CANCEL_DEFERRED, &oldtype);
 	restore_cancelstate(oldstate);
 
-	rc = 0;
-
 	while (!(handle->finished)) {
-		if (pthread_cond_wait(&handle->finished_cond, &handle->finished_cond_mtx) != 0) {
+		if ((rc = pthread_cond_wait(&handle->finished_cond, &fdevents_mtx)) != 0) {
+			errno = rc;
 			ASYNCIO_SYSERROR("pthread_cond_wait");
-			rc = -1;
+			success = 0;
 			break;
 		}
 	}
@@ -942,54 +1140,92 @@ int fdevent_join(fdevent_handle_t fdhandle)
 	disable_cancellations(&oldstate);
 	restore_canceltype(oldtype);
 
-	if (pthread_mutex_unlock(&handle->finished_cond_mtx) != 0)
-		ASYNCIO_SYSERROR("pthread_mutex_unlock");
+	/* Unlock fdevents mutex. */
+	pthread_cleanup_pop(1);
 
-	pthread_cleanup_pop(0);
 	restore_cancelstate(oldstate);
-	return rc;
+
+	if (success)
+		return 0;
+	else
+		return -1;
 }
 
 int fdevent_cancel(fdevent_handle_t fdhandle)
 {
 	struct fdevent_handle *handle;
+	int success = 1;
+	int notify = 0;
 	int oldstate;
 
 	disable_cancellations(&oldstate);
 
 	handle = (struct fdevent_handle *)fdhandle;
 
-	if (lock_fdevents_worker_mutex() != 0) {
+	if (lock_initialization_rdlock() != 0) {
+		ASYNCIO_ERROR("Failed to lock initialization rdlock.\n");
 		restore_cancelstate(oldstate);
 		return -1;
 	}
 
-	if (handle->worker_info != NULL) {
-		remove_fdevents_locked(handle->worker_info, handle);
-		set_changed_fdevents_locked(handle->worker_info);
+	if (lock_fdevents_mtx() != 0) {
+		ASYNCIO_ERROR("Failed to lock fdevents mtx.\n");
+		unlock_initialization_lock();
+		restore_cancelstate(oldstate);
+		return -1;
 	}
 
-	unlock_fdevents_worker_mutex();
+	if (!fdevents_initialized) {
+		unlock_fdevents_mtx();
+		unlock_initialization_lock();
+		restore_cancelstate(oldstate);
+		return -1;
+	}
 
-	/* Race conditions don't matter here. If the in_threadpool became 0 right
-	 * after this check, we can still cancel the threadpool_handle because the
-	 * threadpool_handle remains valid until we release our reference to it. */
-	if (handle->in_threadpool) {
+	if (handle->in_worker_database) {
+		/* Should never happen, but just putting this here to detect potential bugs... */
+		if (handle->has_threadpool_handle)
+			ASYNCIO_ERROR("This should never happen. The fdevent handle is in worker database and has threadpool handle.\n");
+
+		/* Means it has not yet been dispatched to threadpool, so worker won't have access to handle anymore.
+		 * Note that if it was in a thread, it will have access due to the cancelled callback. */
+		remove_fdevents_locked(&fdevents_global_worker_info, handle);
+		set_changed_fdevents_locked(&fdevents_global_worker_info);
+		notify = 1;
+		success = 1;
+		printf("kartel\n");
+	} else if (!(handle->has_threadpool_handle)) {
+		/* Got taken out of the worker database and into the thread dispatcher.
+		 * Need to tell the thread dispatcher not to dispatch the handle to threadpool. */
+		handle->do_not_dispatch_got_cancelled = 1;
+		notify = 0;
+		success = 1;
+	} else {
+		notify = 0;
+		success = 1;
+
 		if (threadpool_cancel(handle->threadpool_handle) != 0) {
 			ASYNCIO_ERROR("Failed to cancel threadpool handle.\n");
-			restore_cancelstate(oldstate);
-			return -1;
+			success = 0;
 		}
-	} else {
-		if (notify_fdevent_handle_finished(handle) != 0) {
-			ASYNCIO_ERROR("Failed to notify fdevent handle finished.\n");
-			restore_cancelstate(oldstate);
-			return -1;
-		}
+
+		printf("Pfouaregom\n");
 	}
 
+	unlock_fdevents_mtx();
+
+	if (notify) {
+		printf("cancelled notify.\n");
+		notify_fdevent_handle_finished(handle);
+	}
+
+	unlock_initialization_lock();
 	restore_cancelstate(oldstate);
-	return 0;
+
+	if (success)
+		return 0;
+	else
+		return -1;
 }
 
 int fdevent_acquire_handle(fdevent_handle_t fdhandle)
@@ -1001,18 +1237,19 @@ int fdevent_acquire_handle(fdevent_handle_t fdhandle)
 
 	handle = (struct fdevent_handle *)fdhandle;
 
-	if (lock_fdevent_handle(handle) != 0) {
+	if (lock_fdevents_mtx() != 0) {
+		ASYNCIO_ERROR("Failed to lock fdevents mtx.\n");
 		restore_cancelstate(oldstate);
 		return -1;
 	}
 
 	if (reference_fdevent_handle_locked(handle) != 0) {
-		unlock_fdevent_handle(handle);
+		unlock_fdevents_mtx();
 		restore_cancelstate(oldstate);
 		return -1;
 	}
 
-	unlock_fdevent_handle(handle);
+	unlock_fdevents_mtx();
 	restore_cancelstate(oldstate);
 	return 0;
 }
@@ -1026,7 +1263,8 @@ void fdevent_release_handle(fdevent_handle_t fdhandle)
 
 	handle = (struct fdevent_handle *)fdhandle;
 
-	if (lock_fdevent_handle(handle) != 0) {
+	if (lock_fdevents_mtx() != 0) {
+		ASYNCIO_ERROR("Failed to lock fdevents mtx.\n");
 		restore_cancelstate(oldstate);
 		return;
 	}
@@ -1034,13 +1272,60 @@ void fdevent_release_handle(fdevent_handle_t fdhandle)
 	dereference_fdevent_handle_locked(handle);
 
 	if (handle->refcount == 0) {
-		unlock_fdevent_handle(handle);
+		unlock_fdevents_mtx();
 		cleanup_fdevent_handle(handle);
 		safe_free(handle);
+	} else {
+		unlock_fdevents_mtx();
+	}
+
+	restore_cancelstate(oldstate);
+}
+
+void fdevent_cleanup()
+{
+	struct fdevent_handle *handle;
+	int oldstate;
+
+	disable_cancellations(&oldstate);
+
+	if (lock_initialization_wrlock() != 0) {
+		ASYNCIO_ERROR("Failed to lock initialization wrlock.\n");
 		restore_cancelstate(oldstate);
 		return;
 	}
 
-	unlock_fdevent_handle(handle);
+	if (fdevents_initialized) {
+		unlock_initialization_lock();
+		restore_cancelstate(oldstate);
+		return;
+	}
+
+	fdevents_initialized = 0;
+	signal_stop_everything();
+
+	if (threadpool_join(fdevents_worker_threadpool_handle) != 0)
+		ASYNCIO_ERROR("Failed to join on fdevents_worker_threadpool_handle.\n");
+
+	if (threadpool_join(thread_dispatcher_threadpool_handle) != 0)
+		ASYNCIO_ERROR("Failed to join on thread_dispatcher_threadpool_handle.\n");
+
+	threadpool_release_handle(fdevents_worker_threadpool_handle);
+	threadpool_release_handle(thread_dispatcher_threadpool_handle);
+
+	/* Release all fdevent handles */
+	while (!queue_empty(&all_fdevent_handles_queue)) {
+		queue_pop(&all_fdevent_handles_queue, all_fdevent_handles_queue, &handle);
+
+		if (handle->has_threadpool_handle) {
+			if (threadpool_join(handle->threadpool_handle) != 0)
+				ASYNCIO_ERROR("Failed to join fdevent handle's threadpool handle.\n");
+		}
+
+		notify_fdevent_handle_finished(handle);
+	}
+
+	threadpool_cleanup();
+	unlock_initialization_lock();
 	restore_cancelstate(oldstate);
 }
