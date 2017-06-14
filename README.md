@@ -1,3 +1,8 @@
+# WARNING: UNDER CONSTRUCTION
+A large amount of refactoring is undergoing, and the code as it is currently will not function.
+I am commiting these changes as a form of backup. When the last commit that doesn't break the code
+is done, I will remove this warning.
+
 # asyncio
 Simple C library for asynchronous computation and event processing.
 
