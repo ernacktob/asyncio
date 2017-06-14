@@ -20,6 +20,9 @@
 
 #define UINT64T_MAX		((uint64_t)(-1)) /* Get rid of compiler warning about 'use of C99 long long integer constant' for UINT64_MAX */
 
+#define CALLBACK_QUEUE_ID	0
+#define NUM_TIMEVENT_QUEUES	1
+
 /* STRUCT DEFINITIONS */
 struct timevent_handle {
 	int timeout;
@@ -41,8 +44,8 @@ struct timevent_handle {
 	pthread_mutex_t mtx;
 
 	/* Used for timevent callback queues */
-	struct timevent_handle *callback_queue_prev;
-	struct timevent_handle *callback_queue_next;
+	struct timevent_handle *prev[NUM_TIMEVENT_QUEUES];
+	struct timevent_handle *next[NUM_TIMEVENT_QUEUES];
 };
 
 struct timevents_worker_info {
@@ -154,9 +157,6 @@ static int init_timevent_handle(struct timevent_handle *handle, const struct tim
 		ASYNCIO_SYSERROR("pthread_cond_init");
 		goto error_cond_mtx;
 	}
-
-	handle->callback_queue_prev = NULL;
-	handle->callback_queue_next = NULL;
 
 	return 0;
 
@@ -365,7 +365,7 @@ static int insert_timevents_locked(struct timevents_worker_info *worker_info, st
 
 	/* The deadline is already in the database, just add handle to callback queue for that deadline */
 	if (priority_queue_lookup(&worker_info->deadlines, handle->deadline, (const void **)&cbqueue)) {
-		queue_push(cbqueue, callback_queue, handle);
+		queue_push(cbqueue, handle);
 	} else {
 		if (worker_info->ndeadlines == MAX_DEADLINES)
 			return -1;
@@ -377,8 +377,8 @@ static int insert_timevents_locked(struct timevents_worker_info *worker_info, st
 			return -1;
 		}
 
-		queue_init(cbqueue);
-		queue_push(cbqueue, callback_queue, handle);
+		queue_init(cbqueue, CALLBACK_QUEUE_ID);
+		queue_push(cbqueue, handle);
 
 		++worker_info->ndeadlines;
 	}
@@ -399,7 +399,7 @@ static void remove_timevents_locked(struct timevents_worker_info *worker_info, s
 
 	last = worker_info->ndeadlines - 1;
 	index = ((unsigned char *)cbqueue - (unsigned char *)&worker_info->callbacks[0]) / sizeof *cbqueue;
-	queue_remove(cbqueue, callback_queue, handle);
+	queue_remove(cbqueue, handle);
 
 	if (queue_empty(cbqueue)) {
 		priority_queue_delete(&worker_info->deadlines, handle->deadline);
@@ -644,7 +644,7 @@ static void timevents_loop(void *arg)
 
 			/* Iterate through all callbacks for that deadline */
 			queue_foreach(cbqueue, handle, next) {
-				next = handle->callback_queue_next; /* The handle might get removed and the next pointer overwritten otherwise */
+				next = handle->next[CALLBACK_QUEUE_ID]; /* The handle might get removed and the next pointer overwritten otherwise */
 
 				if (timevent_acquire_handle(handle) != 0) {
 					ASYNCIO_ERROR("Failed to reference timevent handle");

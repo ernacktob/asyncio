@@ -16,8 +16,13 @@
 #include "logging.h"
 #include "compile_time_assert.h"
 
-#define MAX_POLLFDS		10000
-#define POLLFD_EVENT_NBITS	(CHAR_BIT * sizeof (short))
+#define MAX_POLLFDS			10000
+#define POLLFD_EVENT_NBITS		(CHAR_BIT * sizeof (short))
+
+#define CALLBACK_QUEUE_ID		0
+#define ALL_FDEVENT_HANDLES_QUEUE_ID	1
+#define THREAD_DISPATCHER_QUEUE_ID	2
+#define NUM_FDEVENT_QUEUES		3
 
 /* STRUCT DEFINITIONS */
 struct fdevent_handle {
@@ -42,12 +47,8 @@ struct fdevent_handle {
 
 	/* Used for fdevent callback queues */
 	/* We need to be able to put handle in multiple queues */
-	struct fdevent_handle *callback_queue_prev;
-	struct fdevent_handle *callback_queue_next;
-	struct fdevent_handle *thread_dispatcher_queue_prev;
-	struct fdevent_handle *thread_dispatcher_queue_next;
-	struct fdevent_handle *all_fdevent_handles_queue_prev;
-	struct fdevent_handle *all_fdevent_handles_queue_next;
+	struct fdevent_handle *prev[NUM_FDEVENT_QUEUES];
+	struct fdevent_handle *next[NUM_FDEVENT_QUEUES];
 };
 
 struct fdevent_refcount {
@@ -293,7 +294,7 @@ static void notify_fdevent_handle_finished(struct fdevent_handle *handle)
 
 	printf("Notifying.\n");
 	if (lock_fdevents_mtx() == 0) {
-		queue_remove(&all_fdevent_handles_queue, all_fdevent_handles_queue, handle);
+		queue_remove(&all_fdevent_handles_queue, handle);
 		handle->finished = 1;
 
 		/* Yes, other threads may still try to call fdevent_cancel, but that function
@@ -410,7 +411,7 @@ static int init_fdevents_worker(struct fdevents_worker_info *worker_info)
 		goto error_pipefds;
 
 	/* These are unused for the wake event */
-	queue_init(&worker_info->callbacks[0]);
+	queue_init(&worker_info->callbacks[0], CALLBACK_QUEUE_ID);
 	init_fdevent_refcount_locked(&worker_info->fdevent_refcounts[0]);
 
 	/* Add wake event for poll interruption when a change occured in pollfds */
@@ -461,7 +462,7 @@ static int insert_fdevents_locked(struct fdevents_worker_info *worker_info, stru
 		if (increment_fdevent_refcount_locked(&worker_info->fdevent_refcounts[index], handle->events) != 0)
 			return -1;
 
-		queue_push(cbqueue, callback_queue, handle);
+		queue_push(cbqueue, handle);
 		worker_info->fds[index].events |= handle->events;
 	} else {
 		if (worker_info->nfds == MAX_POLLFDS) {
@@ -484,8 +485,8 @@ static int insert_fdevents_locked(struct fdevents_worker_info *worker_info, stru
 			return -1;
 		}
 
-		queue_init(cbqueue);
-		queue_push(cbqueue, callback_queue, handle);
+		queue_init(cbqueue, CALLBACK_QUEUE_ID);
+		queue_push(cbqueue, handle);
 
 		worker_info->fds[worker_info->nfds].fd = handle->fd;
 		worker_info->fds[worker_info->nfds].events = handle->events;
@@ -509,7 +510,7 @@ static void remove_fdevents_locked(struct fdevents_worker_info *worker_info, str
 	last = worker_info->nfds - 1;
 	index = ((unsigned char *)cbqueue - (unsigned char *)&worker_info->callbacks[0]) / sizeof *cbqueue;
 	decrement_fdevent_refcount_locked(&worker_info->fdevent_refcounts[index], handle->events);
-	queue_remove(cbqueue, callback_queue, handle);
+	queue_remove(cbqueue, handle);
 
 	if (queue_empty(cbqueue)) {
 		hashtable_delete(&worker_info->fd_map, sizeof handle->fd, &handle->fd);
@@ -710,12 +711,12 @@ static int push_dispatcher_task_locked(struct fdevent_handle *handle)
 {
 	int rc;
 
-	queue_push(&thread_dispatcher_queue, thread_dispatcher_queue, handle);
+	queue_push(&thread_dispatcher_queue, handle);
 
 	if ((rc = pthread_cond_signal(&thread_dispatcher_cond)) != 0) {
 		errno = rc;
 		ASYNCIO_SYSERROR("pthread_cond_signal");
-		queue_remove(&thread_dispatcher_queue, thread_dispatcher_queue, handle);
+		queue_remove(&thread_dispatcher_queue, handle);
 		return -1;
 	}
 
@@ -748,7 +749,7 @@ static int pull_dispatcher_task(struct fdevent_handle **handlep, int *stopped)
 	}
 
 	/* Pop new task from queue (this is a misnomer... it's not pop-ing the task that was pushed like a stack) */
-	queue_pop(&thread_dispatcher_queue, thread_dispatcher_queue, &handle);
+	queue_pop(&thread_dispatcher_queue, &handle);
 	unlock_fdevents_mtx();
 
 	*handlep = handle;
@@ -861,7 +862,7 @@ static void fdevents_loop(void *arg)
 		for (i = 0; i < nfds; i++) {
 			if (fds[i].revents & (fds[i].events | POLLERR | POLLHUP | POLLNVAL)) {
 				queue_foreach(&worker_info->callbacks[i], handle, next) {
-					next = handle->callback_queue_next; /* The handle might get removed and the next pointer overwritten otherwise */
+					next = handle->next[CALLBACK_QUEUE_ID]; /* The handle might get removed and the next pointer overwritten otherwise */
 
 					if (fds[i].revents & (handle->events | POLLERR | POLLHUP | POLLNVAL)) {
 						/* At this point the handle refcount is at least 2:
@@ -937,7 +938,7 @@ static int dispatch_handle_to_loop(struct fdevent_handle *handle)
 	handle->in_worker_database = 1;
 	set_changed_fdevents_locked(&fdevents_global_worker_info);
 
-	queue_push(&all_fdevent_handles_queue, all_fdevent_handles_queue, handle);
+	queue_push(&all_fdevent_handles_queue, handle);
 
 	unlock_fdevents_mtx();
 	return 0;
@@ -1020,8 +1021,8 @@ int fdevent_init()
 		return -1;
 	}
 
-	queue_init(&all_fdevent_handles_queue);
-	queue_init(&thread_dispatcher_queue);
+	queue_init(&all_fdevent_handles_queue, ALL_FDEVENT_HANDLES_QUEUE_ID);
+	queue_init(&thread_dispatcher_queue, THREAD_DISPATCHER_QUEUE_ID);
 
 	fdevents_stopped = 0;
 	fdevents_initialized = 1;
@@ -1315,7 +1316,7 @@ void fdevent_cleanup()
 
 	/* Release all fdevent handles */
 	while (!queue_empty(&all_fdevent_handles_queue)) {
-		queue_pop(&all_fdevent_handles_queue, all_fdevent_handles_queue, &handle);
+		queue_pop(&all_fdevent_handles_queue, &handle);
 
 		if (handle->has_threadpool_handle) {
 			if (threadpool_join(handle->threadpool_handle) != 0)

@@ -18,6 +18,11 @@
 
 #define UINT64T_MAX			((uint64_t)(-1)) /* Get rid of compiler warning about 'use of C99 long long integer constant' for UINT64_MAX */
 
+#define WORKERS_TASK_QUEUE_ID		0
+#define REAPER_IMMEDIATE_TASK_QUEUE_ID	1
+#define REAPER_TASK_QUEUE_ID		2
+#define NUM_THREADPOOL_QUEUES		3
+
 /* STRUCT DEFINITIONS */
 struct threadpool_handle {
 	uint64_t refcount;
@@ -36,12 +41,8 @@ struct threadpool_handle {
 
 	/* Used for task queues */
 	/* We need to be able to put handle in multiple queues */
-	struct threadpool_handle *workers_task_queue_prev;
-	struct threadpool_handle *workers_task_queue_next;
-	struct threadpool_handle *reaper_immediate_task_queue_prev;
-	struct threadpool_handle *reaper_immediate_task_queue_next;
-	struct threadpool_handle *reaper_task_queue_prev;
-	struct threadpool_handle *reaper_task_queue_next;
+	struct threadpool_handle *prev[NUM_THREADPOOL_QUEUES];
+	struct threadpool_handle *next[NUM_THREADPOOL_QUEUES];
 };
 
 struct worker_thread_info {
@@ -241,7 +242,7 @@ static void notify_handle_finished(struct threadpool_handle *handle)
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", handle));
 
 	if (lock_threadpool_mtx() == 0) {
-		queue_remove(&reaper_task_queue, reaper_task_queue, handle);
+		queue_remove(&reaper_task_queue, handle);
 		handle->finished = 1;
 
 		ASYNCIO_DEBUG_CALL(2 FUNC(pthread_cond_broadcast) ARG("%p", &handle->finished_cond));
@@ -592,7 +593,7 @@ static void *reaper_thread(void *arg)
 	/* Join on all tasks in the reaper queue. We don't need mutex anymore since threadpool module has stopped, i.e. no more threads can be added. */
 	/* The reaper task queue only contains handles associated to a thread. The handles waiting in worker task queue aren't here. */
 	while (!queue_empty(&reaper_task_queue)) {
-		queue_pop(&reaper_task_queue, reaper_task_queue, &handle);
+		queue_pop(&reaper_task_queue, &handle);
 
 		ASYNCIO_DEBUG_CALL(3 FUNC(pthread_join) ARG("%016llx", handle->thread) ARG("%p", NULL));
 		if ((rc = pthread_join(handle->thread, NULL)) != 0) {
@@ -634,7 +635,7 @@ static void *reaper_thread(void *arg)
 
 	/* Release all handles in the workers task queue */
 	while (!queue_empty(&workers_task_queue)) {
-		queue_pop(&workers_task_queue, workers_task_queue, &handle);
+		queue_pop(&workers_task_queue, &handle);
 		/* Don't call any callbacks, it is as if it never happened (see threadpool_cancel). */
 		notify_handle_finished(handle);
 	}
@@ -656,7 +657,7 @@ static int push_worker_task_locked(struct threadpool_handle *handle)
 	}
 
 	/* Push new task into worker task queue */
-	queue_push(&workers_task_queue, workers_task_queue, handle);
+	queue_push(&workers_task_queue, handle);
 
 	/* Wake up a worker */
 	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_cond_signal) ARG("%p", &workers_newtask_cond));
@@ -664,7 +665,7 @@ static int push_worker_task_locked(struct threadpool_handle *handle)
 		errno = rc;
 		ASYNCIO_SYSERROR("pthread_cond_signal");
 
-		queue_remove(&workers_task_queue, workers_task_queue, handle);
+		queue_remove(&workers_task_queue, handle);
 		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
 		return -1;
 	}
@@ -707,13 +708,13 @@ static int pull_worker_task(struct worker_thread_info *worker_info, struct threa
 	}
 
 	/* Pop new task from queue (this is a misnomer... it's not pop-ing the task that was pushed like a stack) */
-	queue_pop(&workers_task_queue, workers_task_queue, &handle);
+	queue_pop(&workers_task_queue, &handle);
 	handle->thread = worker_info->thread;
 	handle->worker_info = worker_info;
 	handle->in_worker_thread = 1;
 	handle->in_worker_queue = 0;
 
-	queue_push(&reaper_task_queue, reaper_task_queue, handle);
+	queue_push(&reaper_task_queue, handle);
 	unlock_threadpool_mtx();
 
 	*handlep = handle;
@@ -729,7 +730,7 @@ static int push_reaper_task_locked(struct threadpool_handle *handle)
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", handle));
 
 	/* Push new task into reaper immediate task queue */
-	queue_push(&reaper_immediate_task_queue, reaper_immediate_task_queue, handle);
+	queue_push(&reaper_immediate_task_queue, handle);
 
 	/* Wake up reaper */
 	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_cond_signal) ARG("%p", &reaper_cond));
@@ -737,7 +738,7 @@ static int push_reaper_task_locked(struct threadpool_handle *handle)
 		errno = rc;
 		ASYNCIO_SYSERROR("pthread_cond_signal");
 
-		queue_remove(&reaper_immediate_task_queue, reaper_immediate_task_queue, handle);
+		queue_remove(&reaper_immediate_task_queue, handle);
 		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
 		return -1;
 	}
@@ -779,7 +780,7 @@ static int pull_reaper_task(struct threadpool_handle **handlep, int *stopped)
 	}
 
 	/* Pop new task from queue (this is a misnomer... it's not pop-ing the task that was pushed like a stack) */
-	queue_pop(&reaper_immediate_task_queue, reaper_immediate_task_queue, &handle);
+	queue_pop(&reaper_immediate_task_queue, &handle);
 	unlock_threadpool_mtx();
 
 	*handlep = handle;
@@ -845,7 +846,7 @@ static int dispatch_contractor(struct threadpool_handle *handle)
 		if (create_thread(&thread, contractor_thread, handle) == 0) {
 			handle->thread = thread;
 			++contractors_count;
-			queue_push(&reaper_task_queue, reaper_task_queue, handle);
+			queue_push(&reaper_task_queue, handle);
 			unlock_threadpool_mtx();
 
 			ASYNCIO_DEBUG_RETURN(RET("%d", 0));
@@ -891,12 +892,22 @@ static void stop_manager_thread()
 
 	ASYNCIO_DEBUG_ENTER(VOIDARG);
 
+	if (lock_threadpool_mtx() != 0) {
+		ASYNCIO_ERROR("Failed to lock threadpool mtx.\n");
+		ASYNCIO_DEBUG_RETURN(VOIDRET);
+		return;
+	}
+
+	threadpool_stopped = 1;
+
 	/* Wake up manager */
 	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_cond_signal) ARG("%p", &respawn_cond));
 	if ((rc = pthread_cond_signal(&respawn_cond)) != 0) {
 		errno = rc;
 		ASYNCIO_SYSERROR("pthread_cond_signal");
 	}
+
+	unlock_threadpool_mtx();
 
 	/* Join manager thread */
 	ASYNCIO_DEBUG_CALL(3 FUNC(pthread_join) ARG("%016llx", manager_thread_pthread) ARG("%p", NULL));
@@ -911,6 +922,7 @@ static void stop_manager_thread()
 int threadpool_init()
 {
 	int oldstate;
+	int rc;
 
 	ASYNCIO_DEBUG_ENTER(VOIDARG);
 	disable_cancellations(&oldstate);
@@ -924,107 +936,93 @@ int threadpool_init()
 	 * from occuring while they are still doing stuff. */
 	if (lock_initialization_wrlock() != 0) {
 		ASYNCIO_ERROR("Failed to lock initialization wrlock.\n");
-		restore_cancelstate(oldstate);
-		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
-		return -1;
+		rc = -1;
+		goto return_cancelstate;
 	}
 
 	if (lock_threadpool_mtx() != 0) {
 		ASYNCIO_ERROR("Failed to lock threadpool mtx.\n");
-		unlock_initialization_lock();
-		restore_cancelstate(oldstate);
-		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
-		return -1;
+		rc = -1;
+		goto return_initialization_lock;
 	}
 
 	if (threadpool_initialized) {
-		unlock_threadpool_mtx();
-		unlock_initialization_lock();
-		restore_cancelstate(oldstate);
-		ASYNCIO_DEBUG_RETURN(RET("%d", 0));
-		return 0;
+		rc = 0;
+		goto return_threadpool_mtx;
 	}
 
 	if (create_thread(&manager_thread_pthread, manager_thread, NULL) != 0) {
 		ASYNCIO_ERROR("Failed to create manager thread.\n");
-		unlock_threadpool_mtx();
-		unlock_initialization_lock();
-		restore_cancelstate(oldstate);
-		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
-		return -1;
+		rc = -1;
+		goto return_threadpool_mtx;
 	}
 
 	if (create_thread(&reaper_thread_pthread, reaper_thread, NULL) != 0) {
 		ASYNCIO_ERROR("Failed to create reaper thread.\n");
 		unlock_threadpool_mtx();
-		stop_manager_thread();
-		unlock_initialization_lock();
-		restore_cancelstate(oldstate);
-		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
-		return -1;
+		stop_manager_thread(); /* Needs to be done after unlocking to avoid deadlock with the thread that it joins. */
+		rc = -1;
+		goto return_initialization_lock;
 	}
 
-	queue_init(&workers_task_queue);
-	queue_init(&reaper_immediate_task_queue);
-	queue_init(&reaper_task_queue);
+	queue_init(&workers_task_queue, WORKERS_TASK_QUEUE_ID);
+	queue_init(&reaper_immediate_task_queue, REAPER_IMMEDIATE_TASK_QUEUE_ID);
+	queue_init(&reaper_task_queue, REAPER_TASK_QUEUE_ID);
 	contractors_count = 0;
 
 	threadpool_stopped = 0;
 	threadpool_initialized = 1;
 
+	rc = 0;
+
+return_threadpool_mtx:
 	unlock_threadpool_mtx();
+
+return_initialization_lock:
 	unlock_initialization_lock();
 
+return_cancelstate:
 	restore_cancelstate(oldstate);
-	ASYNCIO_DEBUG_RETURN(RET("%d", 0));
-	return 0;
+	ASYNCIO_DEBUG_RETURN(RET("%d", rc));
+	return rc;
 }
 
 int threadpool_dispatch(struct threadpool_dispatch_info *task, threadpool_handle_t *handlep)
 {
 	struct threadpool_handle *handle;
 	int oldstate;
+	int rc;
 
 	ASYNCIO_DEBUG_ENTER(2 ARG("%p", task) ARG("%p", handlep));
 	disable_cancellations(&oldstate);
 
 	if (lock_initialization_rdlock() != 0) {
 		ASYNCIO_ERROR("Failed to lock initialization rdlock.\n");
-		restore_cancelstate(oldstate);
-		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
-		return -1;
+		rc = -1;
+		goto return_cancelstate;
 	}
 
 	if (!threadpool_initialized) {
-		unlock_initialization_lock();
-		restore_cancelstate(oldstate);
-		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
-		return -1;
+		rc = -1;
+		goto return_initialization_lock;
 	}
 
 	if (task->dispatch_info.fn == NULL) {
-		unlock_initialization_lock();
-		restore_cancelstate(oldstate);
-		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
-		return -1;
+		rc = -1;
+		goto return_initialization_lock;
 	}
 
 	handle = safe_malloc(sizeof *handle);
 
 	if (handle == NULL) {
 		ASYNCIO_ERROR("safe_malloc failed.\n");
-		unlock_initialization_lock();
-		restore_cancelstate(oldstate);
-		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
-		return -1;
+		rc = -1;
+		goto return_initialization_lock;
 	}
 
 	if (init_threadpool_handle(handle, task) != 0) {
-		safe_free(handle);
-		unlock_initialization_lock();
-		restore_cancelstate(oldstate);
-		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
-		return -1;
+		rc = -1;
+		goto return_free_handle;
 	}
 
 	/* The caller must have a reference by default to prevent race conditions
@@ -1041,48 +1039,45 @@ int threadpool_dispatch(struct threadpool_dispatch_info *task, threadpool_handle
 		/* Give preference to contractor threads */
 		if (dispatch_contractor(handle) == 0) {
 			*handlep = (threadpool_handle_t)handle;
-			unlock_initialization_lock();
-			restore_cancelstate(oldstate);
-			ASYNCIO_DEBUG_RETURN(RET("%d", 0));
-			return 0;
+			rc = 0;
+			goto return_initialization_lock;
 		}
 
 		/* Try with worker thread instead */
 		if (dispatch_worker(handle) == 0) {
 			*handlep = (threadpool_handle_t)handle;
-			unlock_initialization_lock();
-			restore_cancelstate(oldstate);
-			ASYNCIO_DEBUG_RETURN(RET("%d", 0));
-			return 0;
+			rc = 0;
+			goto return_initialization_lock;
 		}
 	} else {
 		/* Give preference to worker threads */
 		if (dispatch_worker(handle) == 0) {
 			*handlep = (threadpool_handle_t)handle;
-			unlock_initialization_lock();
-			restore_cancelstate(oldstate);
-			ASYNCIO_DEBUG_RETURN(RET("%d", 0));
-			return 0;
+			rc = 0;
+			goto return_initialization_lock;
 		}
 
 		/* Try with contractor thread instead */
 		if (dispatch_contractor(handle) == 0) {
 			*handlep = (threadpool_handle_t)handle;
-			unlock_initialization_lock();
-			restore_cancelstate(oldstate);
-			ASYNCIO_DEBUG_RETURN(RET("%d", 0));
-			return 0;
+			rc = 0;
+			goto return_initialization_lock;
 		}
 	}
 
 	cleanup_threadpool_handle(handle);
+	rc = -1;
 
+return_free_handle:
 	safe_free(handle);
+
+return_initialization_lock:
 	unlock_initialization_lock();
 
+return_cancelstate:
 	restore_cancelstate(oldstate);
-	ASYNCIO_DEBUG_RETURN(RET("%d", -1));
-	return -1;
+	ASYNCIO_DEBUG_RETURN(RET("%d", rc));
+	return rc;
 }
 
 int threadpool_cancel(threadpool_handle_t thandle)
@@ -1097,27 +1092,22 @@ int threadpool_cancel(threadpool_handle_t thandle)
 
 	if (lock_initialization_rdlock() != 0) {
 		ASYNCIO_ERROR("Failed to lock initialization rdlock.\n");
-		restore_cancelstate(oldstate);
-		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
-		return -1;
+		rc = -1;
+		goto return_cancelstate;
 	}
 
 	handle = (struct threadpool_handle *)thandle;
 
 	/* Only cancel cancellable threads */
 	if (!(handle->info.flags & THREADPOOL_FLAG_CANCELLABLE)) {
-		unlock_initialization_lock();
-		restore_cancelstate(oldstate);
-		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
-		return -1;
+		rc = -1;
+		goto return_initialization_lock;
 	}
 
 	if (lock_threadpool_mtx() != 0) {
 		ASYNCIO_ERROR("Failed to lock threadpool mtx.\n");
-		unlock_initialization_lock();
-		restore_cancelstate(oldstate);
-		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
-		return -1;
+		rc = -1;
+		goto return_initialization_lock;
 	}
 
 	success = 0;
@@ -1128,7 +1118,7 @@ int threadpool_cancel(threadpool_handle_t thandle)
 		success = 1;
 	} else if (handle->in_worker_queue) {
 		/* Remove handle from worker queue */
-		queue_remove(&workers_task_queue, workers_task_queue, handle);
+		queue_remove(&workers_task_queue, handle);
 		handle->in_worker_queue = 0;
 		removed_from_queue = 1;
 		success = 1;
@@ -1160,16 +1150,18 @@ int threadpool_cancel(threadpool_handle_t thandle)
 		notify_handle_finished(handle);
 	}
 
-	unlock_initialization_lock();
-	restore_cancelstate(oldstate);
+	if (success)
+		rc = 0;
+	else
+		rc = -1;
 
-	if (success) {
-		ASYNCIO_DEBUG_RETURN(RET("%d", 0));
-		return 0;
-	} else {
-		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
-		return -1;
-	}
+return_initialization_lock:
+	unlock_initialization_lock();
+
+return_cancelstate:
+	restore_cancelstate(oldstate);
+	ASYNCIO_DEBUG_RETURN(RET("%d", rc));
+	return rc;
 }
 
 int threadpool_join(threadpool_handle_t thandle)
@@ -1187,9 +1179,8 @@ int threadpool_join(threadpool_handle_t thandle)
 
 	if (lock_threadpool_mtx() != 0) {
 		ASYNCIO_ERROR("Failed to lock threadpool mtx.\n");
-		restore_cancelstate(oldstate);
-		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
-		return -1;
+		rc = -1;
+		goto return_cancelstate;
 	}
 
 	/* Unlock the threadpool_mtx in cleanup handler if cancelled here */
@@ -1218,21 +1209,22 @@ int threadpool_join(threadpool_handle_t thandle)
 	/* Unlock the threadpool mtx. */
 	pthread_cleanup_pop(1);
 
+	if (success)
+		rc = 0;
+	else
+		rc = -1;
+
+return_cancelstate:
 	restore_cancelstate(oldstate);
-
-	if (!success) {
-		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
-		return -1;
-	}
-
-	ASYNCIO_DEBUG_RETURN(RET("%d", 0));
-	return 0;
+	ASYNCIO_DEBUG_RETURN(RET("%d", rc));
+	return rc;
 }
 
 int threadpool_acquire_handle(threadpool_handle_t thandle)
 {
 	struct threadpool_handle *handle;
 	int oldstate;
+	int rc;
 
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", thandle));
 	disable_cancellations(&oldstate);
@@ -1241,26 +1233,27 @@ int threadpool_acquire_handle(threadpool_handle_t thandle)
 
 	if (lock_threadpool_mtx() != 0) {
 		ASYNCIO_ERROR("Failed to lock threadpool mtx.\n");
-		restore_cancelstate(oldstate);
-		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
-		return -1;
+		rc = -1;
+		goto return_cancelstate;
 	}
 
 	/* Check for overflow */
 	if (handle->refcount >= UINT64T_MAX) {
 		ASYNCIO_ERROR("handle refcount overflow.\n");
-		unlock_threadpool_mtx();
-		restore_cancelstate(oldstate);
-		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
-		return -1;
+		rc = -1;
+		goto return_threadpool_mtx;
 	}
 
 	++(handle->refcount);
+	rc = 0;
 
+return_threadpool_mtx:
 	unlock_threadpool_mtx();
+
+return_cancelstate:
 	restore_cancelstate(oldstate);
-	ASYNCIO_DEBUG_RETURN(RET("%d", 0));
-	return 0;
+	ASYNCIO_DEBUG_RETURN(RET("%d", rc));
+	return rc;
 }
 
 void threadpool_release_handle(threadpool_handle_t thandle)
@@ -1275,34 +1268,28 @@ void threadpool_release_handle(threadpool_handle_t thandle)
 
 	if (lock_threadpool_mtx() != 0) {
 		ASYNCIO_ERROR("Failed to lock threadpool mtx.\n");
-		restore_cancelstate(oldstate);
-		ASYNCIO_DEBUG_RETURN(VOIDRET);
-		return;
+		goto return_cancelstate;
 	}
 
 	/* Check for underflow */
 	if (handle->refcount == 0) {
 		ASYNCIO_ERROR("Handle refcount already 0 before release.\n");
-		unlock_threadpool_mtx();
-		restore_cancelstate(oldstate);
-		ASYNCIO_DEBUG_RETURN(VOIDRET);
-		return;
+		goto return_threadpool_mtx;
 	}
 
 	--(handle->refcount);
 
 	if (handle->refcount == 0) {
 		unlock_threadpool_mtx();
-		cleanup_threadpool_handle(handle);
-
+		cleanup_threadpool_handle(handle); /* Don't wanna do this while holding mtx */
 		safe_free(handle);
-
-		restore_cancelstate(oldstate);
-		ASYNCIO_DEBUG_RETURN(VOIDRET);
-		return;
+		goto return_cancelstate;
 	}
 
+return_threadpool_mtx:
 	unlock_threadpool_mtx();
+
+return_cancelstate:
 	restore_cancelstate(oldstate);
 	ASYNCIO_DEBUG_RETURN(VOIDRET);
 }
@@ -1315,28 +1302,19 @@ void threadpool_cleanup(void)
 	ASYNCIO_DEBUG_ENTER(VOIDARG);
 	disable_cancellations(&oldstate);
 
+	/* Initialization lock used to signal the threadpool_initialized flag. */
 	if (lock_initialization_wrlock() != 0) {
 		ASYNCIO_ERROR("Failed to lock initialization wrlock.\n");
-		restore_cancelstate(oldstate);
-		ASYNCIO_DEBUG_RETURN(VOIDRET);
-		return;
+		goto return_cancelstate;
 	}
 
 	if (lock_threadpool_mtx() != 0) {
 		ASYNCIO_ERROR("Failed to lock threadpool mtx.\n");
-		unlock_initialization_lock();
-		restore_cancelstate(oldstate);
-		ASYNCIO_DEBUG_RETURN(VOIDRET);
-		return;
+		goto return_initialization_lock;
 	}
 
-	if (!threadpool_initialized) {
-		unlock_threadpool_mtx();
-		unlock_initialization_lock();
-		restore_cancelstate(oldstate);
-		ASYNCIO_DEBUG_RETURN(VOIDRET);
-		return;
-	}
+	if (!threadpool_initialized)
+		goto return_threadpool_mtx;
 
 	threadpool_stopped = 1;
 	threadpool_initialized = 0;
@@ -1379,9 +1357,16 @@ void threadpool_cleanup(void)
 		ASYNCIO_SYSERROR("pthread_join");
 	}
 
-	/* Initialization lock used to signal the threadpool_initialized flag. */
+	/* We already unlocked the threadpool mtx above so jump right to next cleanup. */
+	goto return_initialization_lock;
+
+return_threadpool_mtx:
+	unlock_threadpool_mtx();
+
+return_initialization_lock:
 	unlock_initialization_lock();
 
+return_cancelstate:
 	restore_cancelstate(oldstate);
 	ASYNCIO_DEBUG_RETURN(VOIDRET);
 }
