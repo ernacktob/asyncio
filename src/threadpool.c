@@ -92,16 +92,16 @@ static void stop_manager_thread(void);
 
 /* GLOBALS */
 static pthread_mutex_t threadpool_mtx = PTHREAD_MUTEX_INITIALIZER;
-static volatile int threadpool_stopped = 0;
+static int threadpool_stopped = 0;
 
 static pthread_rwlock_t initialization_lock = PTHREAD_RWLOCK_INITIALIZER;
-static volatile int threadpool_initialized = 0;
+static int threadpool_initialized = 0;
 
 static struct worker_thread_info worker_threads[MAX_WORKER_THREADS];
 static pthread_cond_t workers_newtask_cond = PTHREAD_COND_INITIALIZER;
 static decl_queue(struct threadpool_handle, workers_task_queue);
 
-static volatile uint64_t contractors_count = 0;
+static uint64_t contractors_count = 0;
 
 static pthread_t manager_thread_pthread;
 static pthread_cond_t respawn_cond = PTHREAD_COND_INITIALIZER;

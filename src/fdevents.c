@@ -125,10 +125,10 @@ static int dispatch_handle_to_loop(struct fdevent_handle *handle);
 
 /* GLOBALS */
 static pthread_mutex_t fdevents_mtx = PTHREAD_MUTEX_INITIALIZER;
-static volatile int fdevents_stopped = 0;
+static int fdevents_stopped = 0;
 
 static pthread_rwlock_t initialization_lock = PTHREAD_RWLOCK_INITIALIZER;
-static volatile int fdevents_initialized = 0;
+static int fdevents_initialized = 0;
 
 static threadpool_handle_t thread_dispatcher_threadpool_handle;
 static pthread_cond_t thread_dispatcher_cond = PTHREAD_COND_INITIALIZER;
