@@ -12,11 +12,10 @@
 #include "queue.h"
 #include "safe_malloc.h"
 #include "logging.h"
+#include "constants.h"
 
 #define MAX_WORKER_THREADS		5
 #define MAX_CONTRACTORS			1024
-
-#define UINT64T_MAX			((uint64_t)(-1)) /* Get rid of compiler warning about 'use of C99 long long integer constant' for UINT64_MAX */
 
 #define WORKERS_TASK_QUEUE_ID		0
 #define REAPER_IMMEDIATE_TASK_QUEUE_ID	1
@@ -91,11 +90,12 @@ static void stop_manager_thread(void);
 /* END PROTOTYPES */
 
 /* GLOBALS */
-static pthread_mutex_t threadpool_mtx = PTHREAD_MUTEX_INITIALIZER;
-static int threadpool_stopped = 0;
-
 static pthread_rwlock_t initialization_lock = PTHREAD_RWLOCK_INITIALIZER;
 static int threadpool_initialized = 0;
+static uint64_t initialization_count = 0;
+
+static pthread_mutex_t threadpool_mtx = PTHREAD_MUTEX_INITIALIZER;
+static int threadpool_stopped = 0;
 
 static struct worker_thread_info worker_threads[MAX_WORKER_THREADS];
 static pthread_cond_t workers_newtask_cond = PTHREAD_COND_INITIALIZER;
@@ -940,28 +940,16 @@ int threadpool_init()
 		goto return_cancelstate;
 	}
 
-	if (lock_threadpool_mtx() != 0) {
-		ASYNCIO_ERROR("Failed to lock threadpool mtx.\n");
+	if (initialization_count == UINT64T_MAX) {
+		ASYNCIO_ERROR("Reached maximal threadpool initialization count.\n");
 		rc = -1;
 		goto return_initialization_lock;
 	}
 
+	++initialization_count;
+
 	if (threadpool_initialized) {
 		rc = 0;
-		goto return_threadpool_mtx;
-	}
-
-	if (create_thread(&manager_thread_pthread, manager_thread, NULL) != 0) {
-		ASYNCIO_ERROR("Failed to create manager thread.\n");
-		rc = -1;
-		goto return_threadpool_mtx;
-	}
-
-	if (create_thread(&reaper_thread_pthread, reaper_thread, NULL) != 0) {
-		ASYNCIO_ERROR("Failed to create reaper thread.\n");
-		unlock_threadpool_mtx();
-		stop_manager_thread(); /* Needs to be done after unlocking to avoid deadlock with the thread that it joins. */
-		rc = -1;
 		goto return_initialization_lock;
 	}
 
@@ -971,12 +959,29 @@ int threadpool_init()
 	contractors_count = 0;
 
 	threadpool_stopped = 0;
+
+	if (create_thread(&manager_thread_pthread, manager_thread, NULL) != 0) {
+		ASYNCIO_ERROR("Failed to create manager thread.\n");
+		rc = -1;
+		goto return_initialization_count;
+	}
+
+	if (create_thread(&reaper_thread_pthread, reaper_thread, NULL) != 0) {
+		ASYNCIO_ERROR("Failed to create reaper thread.\n");
+		rc = -1;
+		goto return_manager_thread;
+	}
+
 	threadpool_initialized = 1;
 
 	rc = 0;
+	goto return_initialization_lock;
 
-return_threadpool_mtx:
-	unlock_threadpool_mtx();
+return_manager_thread:
+	stop_manager_thread();
+
+return_initialization_count:
+	--initialization_count;
 
 return_initialization_lock:
 	unlock_initialization_lock();
@@ -1012,7 +1017,7 @@ int threadpool_dispatch(struct threadpool_dispatch_info *task, threadpool_handle
 		goto return_initialization_lock;
 	}
 
-	handle = safe_malloc(sizeof *handle);
+	handle = safe_malloc(1, sizeof *handle);
 
 	if (handle == NULL) {
 		ASYNCIO_ERROR("safe_malloc failed.\n");
@@ -1308,13 +1313,23 @@ void threadpool_cleanup(void)
 		goto return_cancelstate;
 	}
 
+	if (!threadpool_initialized)
+		goto return_initialization_lock;
+
+	if (initialization_count == 0) {
+		ASYNCIO_ERROR("Threadpool initialization count already 0, should not happen.\n");
+		goto return_initialization_lock;
+	}
+
+	--initialization_count;
+
+	if (initialization_count > 0)
+		goto return_initialization_lock;
+
 	if (lock_threadpool_mtx() != 0) {
 		ASYNCIO_ERROR("Failed to lock threadpool mtx.\n");
 		goto return_initialization_lock;
 	}
-
-	if (!threadpool_initialized)
-		goto return_threadpool_mtx;
 
 	threadpool_stopped = 1;
 	threadpool_initialized = 0;

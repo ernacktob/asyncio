@@ -3,9 +3,7 @@
 
 #include "priority_queue.h"
 #include "safe_malloc.h"
-
-#define UINT64T_MAX		((uint64_t)(-1)) /* Get rid of compiler warning about 'use of C99 long long integer constant' for UINT64_MAX */
-#define SIZET_MAX		((size_t)(-1)) /* Get rid of compiler warning about 'use of C99 long long integer constant' for SIZE_MAX */
+#include "constants.h"
 
 /* PROTOTYPES */
 static void fix_tree_branch(struct priority_queue *queue, struct prefix_tree_node **nodep);
@@ -39,11 +37,7 @@ int priority_queue_init(struct priority_queue *queue, size_t maxentries)
 	if (maxentries == 0)
 		return -1;
 
-	/* Check for overflow during multiplication */
-	if (maxentries > SIZET_MAX / sizeof *entries)
-		return -1;
-
-	entries = safe_malloc(maxentries * sizeof *entries);
+	entries = safe_malloc(maxentries, sizeof *entries);
 
 	if (entries == NULL)
 		return -1;

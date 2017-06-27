@@ -1,65 +1,72 @@
 #include "safe_malloc.h"
 #include "logging.h"
+#include "constants.h"
+#ifndef MALLOC_IS_THREAD_SAFE
+#include "synchronization.h"
+#endif
 
 #ifndef MALLOC_IS_THREAD_SAFE
-void *malloc_locked(size_t size)
+static ASYNCIO_MUTEX_T malloc_mtx = ASYNCIO_MUTEX_INITIALIZER;
+#endif
+
+void *safe_malloc(size_t count, size_t size)
 {
-	static pthread_mutex_t malloc_mtx = PTHREAD_MUTEX_INITIALIZER;
+	size_t total_size;
 	void *ptr;
-	int rc;
 
-	ASYNCIO_DEBUG_ENTER(1 ARG("%lu", size));
+	ASYNCIO_DEBUG_ENTER(2 ARG("%lu", count), ARG("%lu", size));
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_lock) ARG("%p", &malloc_mtx));
-	if ((rc = pthread_mutex_lock(&malloc_mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_lock");
+	/* Check for overflows */
+	if (size != 0) {
+		if (count > SIZET_MAX / size) {
+			ASYNCIO_ERROR("Integer overflow for size_t during malloc.\n");
+			ASYNCIO_DEBUG_RETURN(RET("%p", NULL));
+			return NULL;
+		}
+	}
+
+	total_size = count * size;
+
+#ifndef MALLOC_IS_THREAD_SAFE
+	if (ASYNCIO_MUTEX_LOCK(&malloc_mtx) != 0) {
+		ASYNCIO_ERROR("Failed to lock malloc_mtx.\n");
 		ASYNCIO_DEBUG_RETURN(RET("%p", NULL));
 		return NULL;
 	}
+#endif
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(malloc) ARG("%lu", size));
-	ptr = malloc(size);
+	ASYNCIO_DEBUG_CALL(2 FUNC(malloc) ARG("%lu", total_size));
+	ptr = malloc(total_size);
 
 	if (ptr == NULL)
 		ASYNCIO_SYSERROR("malloc");
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &malloc_mtx));
-	if ((rc = pthread_mutex_unlock(&malloc_mtx) != 0)) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_unlock");
-	}
+#ifndef MALLOC_IS_THREAD_SAFE
+	ASYNCIO_MUTEX_UNLOCK(&malloc_mtx);
+#endif
 
 	ASYNCIO_DEBUG_RETURN(RET("%p", ptr));
 	return ptr;
 }
-#endif
 
-#ifndef FREE_IS_THREAD_SAFE
-void free_locked(void *ptr)
+void safe_free(void *ptr)
 {
-	static pthread_mutex_t free_mtx = PTHREAD_MUTEX_INITIALIZER;
-	int rc;
-
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", ptr));
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_lock) ARG("%p", &free_mtx));
-	if ((rc = pthread_mutex_lock(&free_mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_lock");
+#ifndef MALLOC_IS_THREAD_SAFE
+	if (ASYNCIO_MUTEX_LOCK(&malloc_mtx) != 0) {
+		ASYNCIO_ERROR("Failed to lock malloc_mtx.\n");
 		ASYNCIO_DEBUG_RETURN(VOIDRET);
 		return;
 	}
+#endif
 
 	ASYNCIO_DEBUG_CALL(2 FUNC(free) ARG("%p", ptr));
 	free(ptr);
 
-	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_mutex_unlock) ARG("%p", &free_mtx));
-	if ((rc = pthread_mutex_unlock(&free_mtx)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_mutex_unlock");
-	}
+#ifndef MALLOC_IS_THREAD_SAFE
+	ASYNCIO_MUTEX_UNLOCK(&malloc_mtx);
+#endif
 
 	ASYNCIO_DEBUG_RETURN(VOIDRET);
 }
-#endif

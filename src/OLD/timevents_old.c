@@ -20,9 +20,6 @@
 
 #define UINT64T_MAX		((uint64_t)(-1)) /* Get rid of compiler warning about 'use of C99 long long integer constant' for UINT64_MAX */
 
-#define CALLBACK_QUEUE_ID	0
-#define NUM_TIMEVENT_QUEUES	1
-
 /* STRUCT DEFINITIONS */
 struct timevent_handle {
 	int timeout;
@@ -44,8 +41,8 @@ struct timevent_handle {
 	pthread_mutex_t mtx;
 
 	/* Used for timevent callback queues */
-	struct timevent_handle *prev[NUM_TIMEVENT_QUEUES];
-	struct timevent_handle *next[NUM_TIMEVENT_QUEUES];
+	struct timevent_handle *prev;
+	struct timevent_handle *next;
 };
 
 struct timevents_worker_info {
@@ -157,6 +154,9 @@ static int init_timevent_handle(struct timevent_handle *handle, const struct tim
 		ASYNCIO_SYSERROR("pthread_cond_init");
 		goto error_cond_mtx;
 	}
+
+	handle->prev = NULL;
+	handle->next = NULL;
 
 	return 0;
 
@@ -377,7 +377,7 @@ static int insert_timevents_locked(struct timevents_worker_info *worker_info, st
 			return -1;
 		}
 
-		queue_init(cbqueue, CALLBACK_QUEUE_ID);
+		queue_init(cbqueue);
 		queue_push(cbqueue, handle);
 
 		++worker_info->ndeadlines;
@@ -644,7 +644,7 @@ static void timevents_loop(void *arg)
 
 			/* Iterate through all callbacks for that deadline */
 			queue_foreach(cbqueue, handle, next) {
-				next = handle->next[CALLBACK_QUEUE_ID]; /* The handle might get removed and the next pointer overwritten otherwise */
+				next = handle->next; /* The handle might get removed and the next pointer overwritten otherwise */
 
 				if (timevent_acquire_handle(handle) != 0) {
 					ASYNCIO_ERROR("Failed to reference timevent handle");
@@ -757,7 +757,7 @@ int timevent_register(struct timevent_info *timinfo, timevent_handle_t *timhandl
 		return -1;
 	}
 
-	handle = safe_malloc(1, sizeof *handle);
+	handle = safe_malloc(sizeof *handle);
 
 	if (handle == NULL) {
 		restore_cancelstate(oldstate);

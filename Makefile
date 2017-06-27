@@ -18,7 +18,7 @@ IDIR = include
 SRCDIR = src
 ODIR = obj
 CC = gcc
-CFLAGS = -Wall -Wextra -Werror -pedantic -fPIC -fvisibility=hidden -DMALLOC_IS_THREAD_SAFE -DFREE_IS_THREAD_SAFE
+CFLAGS = -Wall -Wextra -Werror -Wmissing-prototypes -pedantic -std=c89 -fPIC -DMALLOC_IS_THREAD_SAFE -DFREE_IS_THREAD_SAFE
 LD = ld
 
 .PHONY: default all objdir public_header tests examples clean
