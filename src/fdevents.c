@@ -5,7 +5,6 @@
 #include "fdevents_priv.h"
 #include "events.h"
 #include "queue.h"
-#include "synchronization.h"
 #include "threading.h"
 #include "logging.h"
 #include "safe_malloc.h"
@@ -263,9 +262,9 @@ static int fdevents_handle_wait(const struct fdevents_handle *handle)
 	int oldstate;
 	int rc;
 
-	disable_cancellations(&oldstate);
+	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
 	rc = handle->priv->base.wait(&handle->priv->base, oldstate);
-	restore_cancelstate(oldstate);
+	ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 
 	return rc;
 }
@@ -276,9 +275,9 @@ static int fdevents_handle_cancel(const struct fdevents_handle *handle)
 	int oldstate;
 	int rc;
 
-	disable_cancellations(&oldstate);
+	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
 	rc = handle->priv->base.cancel(&handle->priv->base);
-	restore_cancelstate(oldstate);
+	ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 
 	return rc;
 }
@@ -289,9 +288,9 @@ static int fdevents_handle_acquire(const struct fdevents_handle *handle)
 	int oldstate;
 	int rc;
 
-	disable_cancellations(&oldstate);
+	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
 	rc = handle->priv->base.acquire(&handle->priv->base);
-	restore_cancelstate(oldstate);
+	ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 
 	return rc;
 }
@@ -301,9 +300,9 @@ static void fdevents_handle_release(const struct fdevents_handle *handle)
 {
 	int oldstate;
 
-	disable_cancellations(&oldstate);
+	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
 	handle->priv->base.release(&handle->priv->base);
-	restore_cancelstate(oldstate);
+	ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 }
 
 static void fdevents_handle_callback(void *instance, uint32_t flags, int *continued)
@@ -314,19 +313,19 @@ static void fdevents_handle_callback(void *instance, uint32_t flags, int *contin
 
 	/* Set user-defined cancellation settings */
 	if (flags & FDEVENT_FLAG_ASYNCCANCEL)
-		set_canceltype(CANCEL_ASYNCHRONOUS, &oldtype);
+		ASYNCIO_SET_CANCELTYPE(ASYNCIO_CANCEL_ASYNCHRONOUS, &oldtype);
 	else
-		set_canceltype(CANCEL_DEFERRED, &oldtype);
+		ASYNCIO_SET_CANCELTYPE(ASYNCIO_CANCEL_DEFERRED, &oldtype);
 
 	if (flags & FDEVENT_FLAG_CANCELLABLE)
-		set_cancelstate(CANCEL_ENABLE, &oldstate);
+		ASYNCIO_SET_CANCELSTATE(ASYNCIO_CANCEL_ENABLE, &oldstate);
 	else
-		set_cancelstate(CANCEL_DISABLE, &oldstate);
+		ASYNCIO_SET_CANCELSTATE(ASYNCIO_CANCEL_DISABLE, &oldstate);
 
 	fdhandle_priv->callback_fn(fdhandle_priv->fd, to_fdevents_events(fdhandle_priv->revents), fdhandle_priv->callback_arg, continued);
 
-	restore_cancelstate(oldstate);
-	restore_canceltype(oldtype);
+	ASYNCIO_RESTORE_CANCELSTATE(oldstate);
+	ASYNCIO_RESTORE_CANCELTYPE(oldtype);
 }
 
 static int fdevents_initialize_eventloop_thread(void *instance)
@@ -335,13 +334,7 @@ static int fdevents_initialize_eventloop_thread(void *instance)
 
 	fdeventloop_priv = instance;
 
-	if (ASYNCIO_RWLOCK_RDLOCK(&fdeventloop_priv->lock) != 0) {
-		ASYNCIO_ERROR("Failed to rdlock fdeventloop lock.\n");
-		return -1;
-	}
-
 	copy_fdevents_scratch_locked(fdeventloop_priv);
-	ASYNCIO_RWLOCK_UNLOCK(&fdeventloop_priv->lock);
 
 	return 0;
 }
@@ -419,29 +412,29 @@ static int fdevents_eventloop_listen(struct fdevents_loop *fdeventloop, const st
 	struct fdevents_handle_priv *handle_priv;
 	int oldstate;
 
-	disable_cancellations(&oldstate);
+	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
 
 	if (info->cb == NULL) {
-		restore_cancelstate(oldstate);
+		ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 		return -1;
 	}
 
 	if (set_nonblocking(info->fd) != 0) {
-		restore_cancelstate(oldstate);
+		ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 		return -1;
 	}
 
 	handle_priv = safe_malloc(1, sizeof *handle_priv);
 
 	if (handle_priv == NULL) {
-		restore_cancelstate(oldstate);
+		ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 		return -1;
 	}
 
 	if (events_handle_init(&fdeventloop->priv.base, &handle_priv->base, info->flags) != 0) {
 		ASYNCIO_ERROR("Failed to init events handle.\n");
 		safe_free(handle_priv);
-		restore_cancelstate(oldstate);
+		ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 		return -1;
 	}
 
@@ -464,7 +457,7 @@ static int fdevents_eventloop_listen(struct fdevents_loop *fdeventloop, const st
 		ASYNCIO_ERROR("Failed to dispatch handle to loop.\n");
 		events_handle_cleanup(&fdeventloop->priv.base, &handle_priv->base);
 		safe_free(handle_priv);
-		restore_cancelstate(oldstate);
+		ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 		return -1;
 	}
 
@@ -478,9 +471,9 @@ static int fdevents_eventloop_acquire(const struct fdevents_loop *fdeventloop)
 	int oldstate;
 	int rc;
 
-	disable_cancellations(&oldstate);
+	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
 	rc = fdeventloop->base.acquire(&fdeventloop->base);
-	restore_cancelstate(oldstate);
+	ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 
 	return rc;
 }
@@ -490,9 +483,9 @@ static void fdevents_eventloop_release(const struct fdevents_loop *fdeventloop)
 {
 	int oldstate;
 
-	disable_cancellations(&oldstate);
+	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
 	fdeventloop->base.release(self);
-	restore_cancelstate(oldstate);
+	ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 }
 
 static int init_fdeventloop_private_data(struct fdevents_options *options, struct fdevents_loop_priv *fdeventloop_priv)
@@ -646,9 +639,9 @@ int asyncio_fdevents_init()
 	int oldstate;
 	int rc;
 
-	disable_cancellations(&oldstate);
+	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
 	rc = events_backend_init(&fdevents_backend);
-	restore_cancelstate(oldstate);
+	ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 
 	return rc;
 }
@@ -659,19 +652,19 @@ int asyncio_fdevents_eventloop(struct fdevents_options *options, struct fdevents
 	struct fdevents_loop_priv *fdeventloop_priv;
 	int oldstate;
 
-	disable_cancellations(&oldstate);
+	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
 	fdeventloop_priv = safe_malloc(1, sizeof *fdeventloop_priv);
 
 	if (fdeventloop_priv == NULL) {
 		ASYNCIO_ERROR("Failed to malloc fdeventloop_priv.\n");
-		restore_cancelstate(oldstate);
+		ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 		return -1;
 	}
 
 	if (events_backend_eventloop(&fdevents_backend, &fdeventloop_priv->base, fdeventloop_priv) != 0) {
 		ASYNCIO_ERROR("Failed to create backend base events_loop.\n");
 		safe_free(fdeventloop_priv);
-		restore_cancelstate(oldstate);
+		ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 		return -1;
 	}
 
@@ -712,7 +705,7 @@ void asyncio_fdevents_cleanup()
 {
 	int oldstate;
 
-	disable_cancellations(&oldstate);
+	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
 	events_backend_cleanup(&fdevents_backend);
-	restore_cancelstate(oldstate);
+	ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 }

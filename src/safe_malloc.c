@@ -2,7 +2,7 @@
 #include "logging.h"
 #include "constants.h"
 #ifndef MALLOC_IS_THREAD_SAFE
-#include "synchronization.h"
+#include "threading.h"
 #endif
 
 #ifndef MALLOC_IS_THREAD_SAFE

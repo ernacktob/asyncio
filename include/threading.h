@@ -3,13 +3,52 @@
 
 #include <pthread.h>
 
-void disable_cancellations(int *oldstate);
-void restore_cancelstate(int oldstate);
-void set_cancelstate(int state, int *oldstate);
-void restore_canceltype(int oldtype);
-void set_canceltype(int type, int *oldtype);
+typedef pthread_t			ASYNCIO_THREAD_T
+#define ASYNCIO_THREAD_SELF		pthread_self
 
-#define ASYNCIO_CLEANUP_PUSH	pthread_cleanup_push
-#define ASYNCIO_CLEANUP_POP	pthread_cleanup_pop
+int ASYNCIO_THREAD_CREATE(ASYNCIO_THREAD_T *thread, void *(start_routine)(void *), void *arg);
+int ASYNCIO_THREAD_JOIN(ASYNCIO_THREAD_T thread);
+int ASYNCIO_THREAD_CANCEL(ASYNCIO_THREAD_T thread);
+
+#define ASYNCIO_CANCEL_DISABLED		PTHREAD_CANCEL_DISABLED
+#define ASYNCIO_CANCEL_ENABLED		PTHREAD_CANCEL_ENABLED
+
+#define ASYNCIO_CANCEL_DEFERRED		PTHREAD_CANCEL_DEFERRED
+#define ASYNCIO_CANCEL_ASYNCHRONOUS	PTHREAD_CANCEL_ASYNCHRONOUS
+
+#define ASYNCIO_CLEANUP_PUSH		pthread_cleanup_push
+#define ASYNCIO_CLEANUP_POP		pthread_cleanup_pop
+
+void ASYNCIO_DISABLE_CANCELLATIONS(int *oldstate);
+void ASYNCIO_RESTORE_CANCELSTATE(int oldstate);
+void ASYNCIO_SET_CANCELSTATE(int state, int *oldstate);
+void ASYNCIO_RESTORE_CANCELTYPE(int oldtype);
+void ASYNCIO_SET_CANCELTYPE(int type, int *oldtype);
+
+typedef pthread_rwlock_t		ASYNCIO_RWLOCK_T
+#define ASYNCIO_RWLOCK_INITIALIZER	PTHREAD_RWLOCK_INITIALIZER
+
+typedef pthread_mutex_t			ASYNCIO_MUTEX_T
+#define ASYNCIO_MUTEX_INITIALIZER	PTHREAD_MUTEX_INITIALIZER
+
+typedef pthread_cond_t			ASYNCIO_COND_T
+#define ASYNCIO_COND_INITIALIZER	PTHREAD_COND_INITIALIZER
+
+int ASYNCIO_RWLOCK_INIT(ASYNCIO_RWLOCK_T *lock);
+int ASYNCIO_RWLOCK_WRLOCK(ASYNCIO_RWLOCK_T *lock);
+int ASYNCIO_RWLOCK_RDLOCK(ASYNCIO_RWLOCK_T *lock);
+void ASYNCIO_RWLOCK_UNLOCK(ASYNCIO_RWLOCK_T *lock);
+void ASYNCIO_RWLOCK_DESTROY(ASYNCIO_RWLOCK_T *lock);
+
+int ASYNCIO_MUTEX_INIT(ASYNCIO_MUTEX_T *mtx);
+int ASYNCIO_MUTEX_LOCK(ASYNCIO_MUTEX_T *mtx);
+void ASYNCIO_MUTEX_UNLOCK(ASYNCIO_MUTEX_T *mtx);
+void ASYNCIO_MUTEX_DESTROY(ASYNCIO_MUTEX_T *mtx);
+
+int ASYNCIO_COND_INIT(ASYNCIO_COND_T *cond);
+int ASYNCIO_COND_WAIT(ASYNCIO_COND_T *cond, ASYNCIO_MUTEX_T *mtx);
+void ASYNCIO_COND_SIGNAL(ASYNCIO_COND_T *cond);
+void ASYNCIO_COND_BROADCAST(ASYNCIO_COND_T *cond);
+void ASYNCIO_COND_DESTROY(ASYNCIO_COND_T *cond);
 
 #endif

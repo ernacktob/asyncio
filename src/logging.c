@@ -2,18 +2,18 @@
 #include <string.h>
 #include <stdarg.h>
 
-#include <pthread.h>
 #include <sys/errno.h>
 
 #include "logging.h"
+#include "threading.h"
 
 /* PROTOTYPES */
-static void print_thread(pthread_t thread);
+static void print_thread(ASYNCIO_THREAD_T thread);
 /* END PROTOTYPES */
 
 /* XXX Maybe have a thread whose job is to print to terminal?? */
 
-static void print_thread(pthread_t thread)
+static void print_thread(ASYNCIO_THREAD_T thread)
 {
 	unsigned char *p;
 	size_t i;
@@ -36,7 +36,7 @@ void ASYNCIO_DEBUG(const char *prefixfmt, const char *func, const char *type, in
 	flockfile(stderr);
 	fprintf(stderr, "[ASYNCIO_DEBUG] ");
 	fprintf(stderr, "{thread: ");
-	print_thread(pthread_self());
+	print_thread(ASYNCIO_THREAD_SELF());
 	fprintf(stderr, "} ");
 	fprintf(stderr, prefixfmt, func);
 	fprintf(stderr, "%s: ", type);
@@ -63,7 +63,7 @@ void default_error_func(const char *fmt, va_list args)
 	/* This will show up as a prefix. */
 	flockfile(stderr);
 	fprintf(stderr, "[ASYNCIO_ERROR] {thread: ");
-	print_thread(pthread_self());
+	print_thread(ASYNCIO_THREAD_SELF());
 	fprintf(stderr, "} ");
 	vfprintf(stderr, fmt, args);
 	fflush(stderr);
@@ -74,7 +74,7 @@ void default_syserror_func(const char *s, int errnum)
 {
 	flockfile(stderr);
 	fprintf(stderr, "[ASYNCIO_SYSERROR] {thread: ");
-	print_thread(pthread_self());
+	print_thread(ASYNCIO_THREAD_SELF());
 	fprintf(stderr, "} ");
 	fprintf(stderr, "%s: (%s)\n", s, strerror(errnum));
 	fflush(stderr);

@@ -5,7 +5,7 @@
 
 #include "threadpool.h"
 #include "queue.h"
-#include "synchronization.h"
+#include "threading.h"
 
 #define EVENTS_BACKEND_QUEUE_ID			0
 #define NUMBER_EVENTS_BACKEND_QUEUES		1
@@ -46,7 +46,7 @@ struct events_handle {
 struct events_loop {
 	struct events_backend *backend;
 
-	ASYNCIO_RWLOCK_T lock;
+	ASYNCIO_MUTEX_T mtx;
 	uint64_t refcount;
 	int stopped;
 	int changed;
@@ -79,7 +79,7 @@ struct events_loop {
 };
 
 struct events_backend {
-	ASYNCIO_RWLOCK_T lock;
+	ASYNCIO_MUTEX_T mtx;
 	int initialized;
 	uint64_t refcount;
 
@@ -89,6 +89,6 @@ struct events_backend {
 	struct events_backend *next[NUMBER_EVENTS_BACKEND_QUEUES];
 };
 
-#define EVENTS_BACKEND_INITIALIZER {ASYNCIO_RWLOCK_INITIALIZER, 0}
+#define EVENTS_BACKEND_INITIALIZER {ASYNCIO_MUTEX_INITIALIZER, 0}
 
 #endif

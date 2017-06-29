@@ -2,13 +2,14 @@
 
 #include "threadpool.h"
 #include "events.h"
-#include "synchronization.h"
 #include "threading.h"
 #include "queue.h"
 #include "logging.h"
 #include "constants.h"
 
 /* PROTOTYPES */
+static void unlock_eventloop_mtx_cleanup(void *arg);
+
 static uint32_t get_threadpool_flags(uint32_t fdevents_flags);
 
 static void clear_changed_events_locked(struct events_loop *eventloop);
@@ -40,6 +41,14 @@ int events_backend_init(struct events_backend *backend);
 int events_backend_eventloop(struct events_backend *backend, struct events_loop *eventloop);
 void events_backend_cleanup(struct events_backend *backend);
 /* END PROTOTYPES */
+
+static void unlock_eventloop_mtx_cleanup(void *arg)
+{
+	struct events_loop *eventloop;
+
+	eventloop = arg;
+	ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
+}
 
 static uint32_t get_threadpool_flags(uint32_t fdevents_flags)
 {
@@ -86,7 +95,7 @@ static void notify_events_handle_finished(struct events_handle *handle)
 	/* This function is responsible for ending the handle life cycle through the events module.
 	 * A reference may still be held by users, but it stops existing as far as this module is concerned. */
 
-	if (ASYNCIO_RWLOCK_WRLOCK(&handle->eventloop->lock) == 0) {
+	if (ASYNCIO_MUTEX_LOCK(&handle->eventloop->mtx) == 0) {
 		queue_remove(&handle->eventloop->all_handles, handle);
 		handle->finished = 1;
 
@@ -98,9 +107,9 @@ static void notify_events_handle_finished(struct events_handle *handle)
 		}
 
 		ASYNCIO_COND_BROADCAST(&handle->finished_cond);
-		ASYNCIO_RWLOCK_UNLOCK(&handle->eventloop->lock);
+		ASYNCIO_MUTEX_UNLOCK(&handle->eventloop->mtx);
 	} else {
-		ASYNCIO_ERROR("Failed to wrlock handle's events lock.\n");
+		ASYNCIO_ERROR("Failed to lock handle's events mtx.\n");
 	}
 
 	events_handle_release(handle);
@@ -114,14 +123,14 @@ static void fatal_error_on_handle(struct events_handle *handle)
 
 static int events_dispatch_handle_to_loop(struct events_loop *eventloop, struct events_handle *handle)
 {
-	if (ASYNCIO_RWLOCK_WRLOCK(&eventloop->lock) != 0) {
-		ASYNCIO_ERROR("Failed to wrlock eventloop lock.\n");
+	if (ASYNCIO_MUTEX_LOCK(&eventloop->mtx) != 0) {
+		ASYNCIO_ERROR("Failed to lock eventloop mtx.\n");
 		return -1;
 	}
 
 	if (eventloop->backend_insert_events_handle_locked(eventloop->instance, handle->instance) != 0) {
 		ASYNCIO_ERROR("Failed to insert events handle.\n");
-		ASYNCIO_RWLOCK_UNLOCK(&eventloop->lock);
+		ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
 		return -1;
 	}
 
@@ -130,7 +139,7 @@ static int events_dispatch_handle_to_loop(struct events_loop *eventloop, struct 
 
 	queue_push(&eventloop->all_handles, handle);
 
-	ASYNCIO_RWLOCK_UNLOCK(&eventloop->lock);
+	ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
 	return 0;
 }
 
@@ -178,8 +187,8 @@ static void events_threadpool_completed(void *arg)
 
 	handle = (struct events_handle *)arg;
 
-	if (ASYNCIO_RWLOCK_WRLOCK(&handle->eventloop->lock) != 0) {
-		ASYNCIO_ERROR("Failed to wrlock handle's eventloop lock.\n");
+	if (ASYNCIO_MUTEX_LOCK(&handle->eventloop->mtx) != 0) {
+		ASYNCIO_ERROR("Failed to lock handle's eventloop mtx.\n");
 		fatal_error_on_handle(handle);
 		return;
 	}
@@ -196,16 +205,16 @@ static void events_threadpool_completed(void *arg)
 
 		if (handle->backend_insert_events_handle_locked(handle->eventloop->instance, handle->instance) != 0) {
 			ASYNCIO_ERROR("Failed to re-dispatch handle to loop.\n");
-			ASYNCIO_RWLOCK_UNLOCK(&handle->eventloop->lock);
+			ASYNCIO_MUTEX_UNLOCK(&handle->eventloop->mtx);
 			fatal_error_on_handle(handle);
 			return;
 		}
 
 		handle->in_worker_database = 1;
 		set_changed_events_locked(handle->eventloop);
-		ASYNCIO_RWLOCK_UNLOCK(&handle->eventloop->lock);
+		ASYNCIO_MUTEX_UNLOCK(&handle->eventloop->mtx);
 	} else {
-		ASYNCIO_RWLOCK_UNLOCK(&handle->eventloop->lock);
+		ASYNCIO_MUTEX_UNLOCK(&handle->eventloop->mtx);
 		notify_events_handle_finished(handle);
 	}
 }
@@ -260,15 +269,15 @@ static void eventloop_thread(void *arg)
 			break;
 		}
 
-		if (ASYNCIO_RWLOCK_WRLOCK(&eventloop->lock) != 0) {
-			ASYNCIO_ERROR("Failed to wrlock eventloop lock.\n");
+		if (ASYNCIO_MUTEX_LOCK(&eventloop->mtx) != 0) {
+			ASYNCIO_ERROR("Failed to lock eventloop mtx.\n");
 			/* XXX Have backend error callback? */
 			break;
 		}
 
 		/* Stop condition for eventloop. */
 		if (eventloop->stopped) {
-			ASYNCIO_RWLOCK_UNLOCK(&eventloop->lock);
+			ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
 			break;
 		}
 
@@ -277,7 +286,7 @@ static void eventloop_thread(void *arg)
 			eventloop->backend_process_changed_events_locked(eventloop->instance);
 			eventloop->backend_clearwake_eventloop_locked(eventloop->instance);
 			eventloop->changed = 0;
-			ASYNCIO_RWLOCK_UNLOCK(&eventloop->lock);
+			ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
 			continue;
 		}
 
@@ -286,7 +295,7 @@ static void eventloop_thread(void *arg)
 		eventloop->backend_scan_for_events_locked(eventloop->instance);
 
 		eventloop->backend_continue_eventloop_thread_locked(eventloop->instance);
-		ASYNCIO_RWLOCK_UNLOCK(&eventloop->lock);
+		ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
 	}
 
 	eventloop->backend_cleanup_eventloop_thread(eventloop->instance);
@@ -294,15 +303,15 @@ static void eventloop_thread(void *arg)
 
 static void stop_eventloop_thread(struct events_loop *eventloop)
 {
-	if (ASYNCIO_RWLOCK_WRLOCK(&eventloop->lock)) {
-		ASYNCIO_ERROR("Failed to wrlock eventloop lock.\n");
+	if (ASYNCIO_MUTEX_LOCK(&eventloop->mtx)) {
+		ASYNCIO_ERROR("Failed to lock eventloop mtx.\n");
 		return;
 	}
 
 	eventloop->stopped = 1;
 	eventloop->backend_wakeup_eventloop_locked(eventloop->instance);
 
-	ASYNCIO_RWLOCK_UNLOCK(&eventloop->lock);
+	ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
 
 	if (threadpool_join(&eventloop->threadpool_handle) != 0)
 		ASYNCIO_ERROR("Failed to join on eventloop threadpool handle.\n");
@@ -317,35 +326,35 @@ static int events_handle_wait(const struct events_handle *handle, int old_cancel
 	int oldtype;
 	int success = 1;
 
-	if (ASYNCIO_RWLOCK_RDLOCK(&handle->eventloop->lock) != 0) {
-		ASYNCIO_ERROR("Failed to rdlock fdevents lock.\n");
+	if (ASYNCIO_MUTEX_LOCK(&handle->eventloop->mtx) != 0) {
+		ASYNCIO_ERROR("Failed to lock eventloop mtx.\n");
 		return -1;
 	}
 
 	handle = (struct events_handle *)handle;
 
-	/* Unlock the eventloop lock in cleanup handler if cancelled here */
-	ASYNCIO_CLEANUP_PUSH(unlock_eventloop_lock_cleanup, handle->eventloop);
+	/* Unlock the eventloop mtx in cleanup handler if cancelled here */
+	ASYNCIO_CLEANUP_PUSH(unlock_eventloop_mtx_cleanup, handle->eventloop);
 
 	/* Restore cancelstate while waiting for condition variable
 	 * to allow cancellation in this case. But set cancellation type to DEFERRED
 	 * in order to make sure we cancel during ASYNCIO_COND_WAIT, which should guarantee
-	 * that the eventloop lock is locked during the cleanup handler. */
-	set_canceltype(ASYNCIO_CANCEL_DEFERRED, &oldtype);
-	restore_cancelstate(old_cancelstate);
+	 * that the eventloop mtx is locked during the cleanup handler. */
+	ASYNCIO_SET_CANCELTYPE(ASYNCIO_CANCEL_DEFERRED, &oldtype);
+	ASYNCIO_RESTORE_CANCELSTATE(old_cancelstate);
 
 	while (!(handle->finished)) {
-		if (ASYNCIO_COND_WAIT(&handle->finished_cond, &handle->eventloop->lock) != 0) {
+		if (ASYNCIO_COND_WAIT(&handle->finished_cond, &handle->eventloop->mtx) != 0) {
 			ASYNCIO_ERROR("Failed to wait on handle finished_cond.\n");
 			success = 0;
 			break;
 		}
 	}
 
-	disable_cancellations(&oldstate);
-	restore_canceltype(oldtype);
+	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
+	ASYNCIO_RESTORE_CANCELTYPE(oldtype);
 
-	/* Unlock eventloop lock. */
+	/* Unlock eventloop mtx. */
 	ASYNCIO_CLEANUP_POP(1);
 
 	if (success)
@@ -359,8 +368,8 @@ static int events_handle_cancel(const struct events_handle *handle)
 	int success = 1;
 	int notify = 0;
 
-	if (ASYNCIO_RWLOCK_WRLOCK(&handle->eventloop->lock) != 0) {
-		ASYNCIO_ERROR("Failed to wrlock handle's eventloop lock.\n");
+	if (ASYNCIO_MUTEX_LOCK(&handle->eventloop->mtx) != 0) {
+		ASYNCIO_ERROR("Failed to lock handle's eventloop mtx.\n");
 		return -1;
 	}
 
@@ -385,7 +394,7 @@ static int events_handle_cancel(const struct events_handle *handle)
 		}
 	}
 
-	ASYNCIO_RWLOCK_UNLOCK(&handle->eventloop->lock);
+	ASYNCIO_MUTEX_UNLOCK(&handle->eventloop->mtx);
 
 	if (notify)
 		notify_events_handle_finished(handle);
@@ -401,27 +410,27 @@ static int events_handle_acquire(const struct events_handle *handle)
 	/* Note: In general, only one who owns a reference to handle can acquire it, for someone else.
 	 * This is to prevent race-conditions where last owner releases reference while someone else
 	 * acquires it (if the acquirer loses the lock race, they get dangling pointer) */
-	if (ASYNCIO_RWLOCK_WRLOCK(&handle->eventloop->lock) != 0) {
-		ASYNCIO_ERROR("Failed to wrlock handle's eventloop lock.\n");
+	if (ASYNCIO_MUTEX_LOCK(&handle->eventloop->mtx) != 0) {
+		ASYNCIO_ERROR("Failed to lock handle's eventloop mtx.\n");
 		return -1;
 	}
 
 	if (handle->refcount == UINT64T_MAX) {
 		ASYNCIO_ERROR("Reached maximum refcount for handle.");
-		ASYNCIO_RWLOCK_UNLOCK(&handle->eventloop->lock);
+		ASYNCIO_MUTEX_UNLOCK(&handle->eventloop->mtx);
 		return -1;
 	}
 
 	++(handle->refcount);
-	ASYNCIO_RWLOCK_UNLOCK(&handle->eventloop->lock);
+	ASYNCIO_MUTEX_UNLOCK(&handle->eventloop->mtx);
 
 	return 0;
 }
 
 static void events_handle_release(const struct events_handle *handle)
 {
-	if (ASYNCIO_RWLOCK_WRLOCK(&handle->eventloop->lock) != 0) {
-		ASYNCIO_ERROR("Failed to wrlock handle's eventloop lock.\n");
+	if (ASYNCIO_MUTEX_LOCK(&handle->eventloop->mtx) != 0) {
+		ASYNCIO_ERROR("Failed to lock handle's eventloop mtx.\n");
 		return;
 	}
 
@@ -434,11 +443,11 @@ static void events_handle_release(const struct events_handle *handle)
 	--(handle->refcount);
 
 	if (handle->refcount > 0) {
-		ASYNCIO_RWLOCK_UNLOCK(&handle->eventloop->lock);
+		ASYNCIO_MUTEX_UNLOCK(&handle->eventloop->mtx);
 		return;
 	}
 
-	ASYNCIO_RWLOCK_UNLOCK(&handle->eventloop->lock);
+	ASYNCIO_MUTEX_UNLOCK(&handle->eventloop->mtx);
 
 	ASYNCIO_COND_DESTROY(&handle->finished_cond);
 	handle->backend_cleanup_handle(handle->instance);
@@ -446,19 +455,19 @@ static void events_handle_release(const struct events_handle *handle)
 
 static int events_eventloop_acquire(struct events_loop *eventloop)
 {
-	if (ASYNCIO_RWLOCK_WRLOCK(&eventloop->lock) != 0) {
-		ASYNCIO_ERROR("Failed to wrlock eventloop lock.\n");
+	if (ASYNCIO_MUTEX_LOCK(&eventloop->mtx) != 0) {
+		ASYNCIO_ERROR("Failed to lock eventloop mtx.\n");
 		return -1;
 	}
 
 	if (eventloop->refcount == UINT64T_MAX) {
 		ASYNCIO_ERROR("Refcount for eventloop reached maximum.\n");
-		ASYNCIO_RWLOCK_UNLOCK(&eventloop->lock);
+		ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
 		return -1;
 	}
 
 	++(eventloop->refcount);
-	ASYNCIO_RWLOCK_UNLOCK(&eventloop->lock);
+	ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
 	return 0;
 }
 
@@ -466,21 +475,21 @@ static void events_eventloop_release(struct events_loop *eventloop)
 {
 	struct events_handle *handle;
 
-	if (ASYNCIO_RWLOCK_WRLOCK(&eventloop->lock) != 0) {
-		ASYNCIO_ERROR("Failed to wrlock eventloop lock.\n");
+	if (ASYNCIO_MUTEX_LOCK(&eventloop->mtx) != 0) {
+		ASYNCIO_ERROR("Failed to lock eventloop mtx.\n");
 		return;
 	}
 
 	if (eventloop->refcount == 0) {
 		ASYNCIO_ERROR("Refcount for eventloop already 0.\n");
-		ASYNCIO_RWLOCK_UNLOCK(&eventloop->lock);
+		ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
 		return;
 	}
 
 	--(eventloop->refcount);
 
 	if (eventloop->refcount > 0) {
-		ASYNCIO_RWLOCK_UNLOCK(&eventloop->lock);
+		ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
 		return;
 	}
 
@@ -500,14 +509,14 @@ static void events_eventloop_release(struct events_loop *eventloop)
 	threadpool_cleanup();
 	eventloop->backend_cleanup_eventloop(eventloop->instance);
 
-	ASYNCIO_RWLOCK_UNLOCK(&eventloop->lock);
-	ASYNCIO_RWLOCK_DESTROY(&eventloop->lock);
+	ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
+	ASYNCIO_MUTEX_DESTROY(&eventloop->mtx);
 }
 
 int events_backend_init(struct events_backend *backend)
 {
-	if (ASYNCIO_RWLOCK_WRLOCK(&backend->lock) != 0) {
-		ASYNCIO_ERROR("Failed to wrlock backend lock.\n");
+	if (ASYNCIO_MUTEX_LOCK(&backend->mtx) != 0) {
+		ASYNCIO_ERROR("Failed to lock backend mtx.\n");
 		return -1;
 	}
 
@@ -519,13 +528,13 @@ int events_backend_init(struct events_backend *backend)
 
 	if (backend->refcount == UINT64T_MAX) {
 		ASYNCIO_ERROR("Backend refcount reached maximum.\n");
-		ASYNCIO_RWLOCK_UNLOCK(&backend->lock);
+		ASYNCIO_MUTEX_UNLOCK(&backend->mtx);
 		return -1;
 	}
 
 	++(backend->refcount);
 
-	ASYNCIO_RWLOCK_UNLOCK(&backend->lock);
+	ASYNCIO_MUTEX_UNLOCK(&backend->mtx);
 	return 0;
 }
 
@@ -550,8 +559,8 @@ int events_backend_eventloop(struct events_backend *backend, struct events_loop 
 	eventloop->stopped = 0;
 	eventloop->changed = 0;
 
-	if (ASYNCIO_RWLOCK_INIT(&eventloop->lock) != 0) {
-		ASYNCIO_ERROR("Failed to init eventloop lock.\n");
+	if (ASYNCIO_MUTEX_INIT(&eventloop->mtx) != 0) {
+		ASYNCIO_ERROR("Failed to init eventloop mtx.\n");
 		threadpool_cleanup();
 		return -1;
 	}
@@ -566,7 +575,7 @@ int events_backend_eventloop(struct events_backend *backend, struct events_loop 
 
 	if (threadpool_dispatch(&eventloop_task, &eventloop->threadpool_handle) != 0) {
 		ASYNCIO_ERROR("Failed to dispatch eventloop task.\n");
-		ASYNCIO_RWLOCK_DESTROY(&eventloop->lock);
+		ASYNCIO_MUTEX_DESTROY(&eventloop->mtx);
 		threadpool_cleanup();
 		return -1;
 	}
@@ -578,26 +587,26 @@ void events_backend_cleanup(struct events_backend *backend)
 {
 	struct events_loop *eventloop;
 
-	if (ASYNCIO_RWLOCK_WRLOCK(&backend->lock) != 0) {
-		ASYNCIO_ERROR("Failed to wrlock backend lock.\n");
+	if (ASYNCIO_MUTEX_LOCK(&backend->mtx) != 0) {
+		ASYNCIO_ERROR("Failed to lock backend mtx.\n");
 		return -1;
 	}
 
 	if (!(backend->initialized)) {
-		ASYNCIO_RWLOCK_UNLOCK(&backend->lock);
+		ASYNCIO_MUTEX_UNLOCK(&backend->mtx);
 		return 0;
 	}
 
 	if (backend->refcount == 0) {
 		ASYNCIO_ERROR("Backend refcount already 0, should never happen.\n");
-		ASYNCIO_RWLOCK_UNLOCK(&backend->lock);
+		ASYNCIO_MUTEX_UNLOCK(&backend->mtx);
 		return -1;
 	}
 
 	--(backend->refcount);
 
 	if (backend->refcount > 0) {
-		ASYNCIO_RWLOCK_UNLOCK(&backend->lock);
+		ASYNCIO_MUTEX_UNLOCK(&backend->mtx);
 		return 0;
 	}
 
@@ -608,6 +617,6 @@ void events_backend_cleanup(struct events_backend *backend)
 		eventloop->release(eventloop);
 	}
 
-	ASYNCIO_RWLOCK_UNLOCK(&backend->lock);
+	ASYNCIO_MUTEX_UNLOCK(&backend->mtx);
 	return 0;
 }

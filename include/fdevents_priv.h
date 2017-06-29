@@ -7,7 +7,7 @@
 #include "fdevents.h"
 #include "events.h"
 #include "queue.h"
-#include "synchronization.h"
+#include "threading.h"
 #include "hashtable.h"
 
 #define FDEVENTS_HANDLE_QUEUE_ID	0
@@ -34,7 +34,6 @@ struct fdevents_loop_priv {
 	struct fdevents_loop pub;
 	struct events_loop base;
 
-	ASYNCIO_RWLOCK_T lock;
 	nfds_t max_nfds;
 	nfds_t nfds;
 	struct pollfd *fds;
