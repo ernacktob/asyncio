@@ -48,7 +48,7 @@ examples: $(TARGET)
 
 clean:
 	rm -f $(TARGET)
-	rm -f asyncio.h
+	rm -f asyncio_*.h
 	rm -rf obj
 	$(MAKE) -C tests clean
 	$(MAKE) -C examples clean

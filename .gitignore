@@ -17,4 +17,4 @@ tests/obj
 tests/include
 
 # Ignore asyncio.h header copied on top-level directory
-/asyncio.h
+/asyncio_*.h
