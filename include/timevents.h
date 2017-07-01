@@ -3,11 +3,6 @@
 
 #include <stdint.h>
 
-#define TIMEVENT_FLAG_NONE		0
-#define TIMEVENT_FLAG_CONTRACTOR	(1 << 0)
-#define TIMEVENT_FLAG_CANCELLABLE	(1 << 1)
-#define TIMEVENT_FLAG_ASYNCCANCEL	(1 << 2)
-
 typedef void *timevent_handle_t;
 typedef void (*timevent_callback)(void *arg, int *continued);
 

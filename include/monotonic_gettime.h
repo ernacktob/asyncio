@@ -3,6 +3,6 @@
 
 #include <time.h>
 
-int monotonic_gettime(struct timespec *ts);
+int asyncio_monotonic_gettime(struct timespec *ts);
 
 #endif

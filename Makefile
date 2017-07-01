@@ -18,17 +18,17 @@ IDIR = include
 SRCDIR = src
 ODIR = obj
 CC = gcc
-CFLAGS = -Wall -Wextra -Werror -Wmissing-prototypes -pedantic -std=c89 -fPIC -DMALLOC_IS_THREAD_SAFE -DFREE_IS_THREAD_SAFE
+CFLAGS = -Wall -Wextra -Werror -Wmissing-prototypes -pedantic -std=c89 -fPIC -DMALLOC_IS_THREAD_SAFE
 LD = ld
 
-.PHONY: default all objdir public_header tests examples clean
+.PHONY: default all objdir public_headers tests examples clean
 
 default: $(TARGET)
 all: default
 objdir:
 	mkdir -p obj
-public_header:
-	cp $(IDIR)/asyncio.h .
+public_headers:
+	cp $(IDIR)/asyncio_*.h .
 
 HEADERS = $(wildcard $(IDIR)/*.h)
 SOURCES = $(wildcard $(SRCDIR)/*.c)
@@ -37,7 +37,7 @@ OBJECTS = $(patsubst $(SRCDIR)/%.c, $(ODIR)/%.o, $(SOURCES))
 $(ODIR)/%.o: $(SRCDIR)/%.c $(HEADERS)
 	$(CC) -c $(CFLAGS) -I$(IDIR) $< -o $@
 
-$(TARGET): objdir public_header $(OBJECTS)
+$(TARGET): objdir public_headers $(OBJECTS)
 	$(LD) $(LDFLAGS) $(OBJECTS) $(LIBS) -o $@
 
 tests:

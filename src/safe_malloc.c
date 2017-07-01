@@ -9,12 +9,12 @@
 static ASYNCIO_MUTEX_T malloc_mtx = ASYNCIO_MUTEX_INITIALIZER;
 #endif
 
-void *safe_malloc(size_t count, size_t size)
+void *asyncio_safe_malloc(size_t count, size_t size)
 {
 	size_t total_size;
 	void *ptr;
 
-	ASYNCIO_DEBUG_ENTER(2 ARG("%lu", count), ARG("%lu", size));
+	ASYNCIO_DEBUG_ENTER(2 ARG("%lu", count) ARG("%lu", size));
 
 	/* Check for overflows */
 	if (size != 0) {
@@ -49,7 +49,7 @@ void *safe_malloc(size_t count, size_t size)
 	return ptr;
 }
 
-void safe_free(void *ptr)
+void asyncio_safe_free(void *ptr)
 {
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", ptr));
 

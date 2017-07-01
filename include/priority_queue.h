@@ -22,13 +22,13 @@ struct priority_queue {
 
 #define priority_queue_empty(queue) ((queue)->nentries == 0)
 
-int priority_queue_init(struct priority_queue *queue, size_t maxentries);
-int priority_queue_insert(struct priority_queue *queue, uint64_t priority, const void *data);
-int priority_queue_modify(struct priority_queue *queue, uint64_t priority, const void *data);
-int priority_queue_lookup(struct priority_queue *queue, uint64_t priority, const void **datap);
-int priority_queue_peek(struct priority_queue *queue, uint64_t *priorityp, const void **datap);
-int priority_queue_pop(struct priority_queue *queue, uint64_t *priorityp, const void **datap);
-void priority_queue_delete(struct priority_queue *queue, uint64_t priority);
-void priority_queue_destroy(struct priority_queue *queue);
+int asyncio_priority_queue_init(struct priority_queue *queue, size_t maxentries);
+int asyncio_priority_queue_insert(struct priority_queue *queue, uint64_t priority, const void *data);
+int asyncio_priority_queue_modify(struct priority_queue *queue, uint64_t priority, const void *data);
+int asyncio_priority_queue_lookup(struct priority_queue *queue, uint64_t priority, const void **datap);
+int asyncio_priority_queue_peek(struct priority_queue *queue, uint64_t *priorityp, const void **datap);
+int asyncio_priority_queue_pop(struct priority_queue *queue, uint64_t *priorityp, const void **datap);
+void asyncio_priority_queue_delete(struct priority_queue *queue, uint64_t priority);
+void asyncio_priority_queue_destroy(struct priority_queue *queue);
 
 #endif

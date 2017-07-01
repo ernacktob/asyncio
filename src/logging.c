@@ -58,7 +58,7 @@ void ASYNCIO_DEBUG(const char *prefixfmt, const char *func, const char *type, in
 }
 #endif
 
-void default_error_func(const char *fmt, va_list args)
+static void default_error_func(const char *fmt, va_list args)
 {
 	/* This will show up as a prefix. */
 	flockfile(stderr);
@@ -70,7 +70,7 @@ void default_error_func(const char *fmt, va_list args)
 	funlockfile(stderr);
 }
 
-void default_syserror_func(const char *s, int errnum)
+static void default_syserror_func(const char *s, int errnum)
 {
 	flockfile(stderr);
 	fprintf(stderr, "[ASYNCIO_SYSERROR] {thread: ");

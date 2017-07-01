@@ -31,7 +31,7 @@ static size_t findbucket(const void *key, size_t klen, size_t nbuckets)
 	return bucket;
 }
 
-int hashtable_init(struct hashtable *table, size_t maxentries)
+int asyncio_hashtable_init(struct hashtable *table, size_t maxentries)
 {
 	size_t nbuckets;
 	struct hashtable_entry **buckets;
@@ -42,15 +42,15 @@ int hashtable_init(struct hashtable *table, size_t maxentries)
 		return -1;
 
 	nbuckets = maxentries;
-	buckets = safe_malloc(nbuckets, sizeof *buckets);
+	buckets = asyncio_safe_malloc(nbuckets, sizeof *buckets);
 
 	if (buckets == NULL)
 		return -1;
 
-	entries = safe_malloc(maxentries, sizeof *entries);
+	entries = asyncio_safe_malloc(maxentries, sizeof *entries);
 
 	if (entries == NULL) {
-		safe_free(buckets);
+		asyncio_safe_free(buckets);
 		return -1;
 	}
 
@@ -72,7 +72,7 @@ int hashtable_init(struct hashtable *table, size_t maxentries)
 	return 0;
 }
 
-int hashtable_insert(struct hashtable *table, size_t klen, const void *key, const void *value)
+int asyncio_hashtable_insert(struct hashtable *table, size_t klen, const void *key, const void *value)
 {
 	struct hashtable_entry *entry, *prev;
 	size_t bucket;
@@ -111,7 +111,7 @@ int hashtable_insert(struct hashtable *table, size_t klen, const void *key, cons
 	return 0;
 }
 
-int hashtable_modify(struct hashtable *table, size_t klen, const void *key, const void *value)
+int asyncio_hashtable_modify(struct hashtable *table, size_t klen, const void *key, const void *value)
 {
 	struct hashtable_entry *entry;
 	size_t bucket;
@@ -131,7 +131,7 @@ int hashtable_modify(struct hashtable *table, size_t klen, const void *key, cons
 	return -1;
 }
 
-int hashtable_lookup(struct hashtable *table, size_t klen, const void *key, const void **valuep)
+int asyncio_hashtable_lookup(struct hashtable *table, size_t klen, const void *key, const void **valuep)
 {
 	struct hashtable_entry *entry;
 	size_t bucket;
@@ -150,7 +150,7 @@ int hashtable_lookup(struct hashtable *table, size_t klen, const void *key, cons
 	return 0;
 }
 
-void hashtable_delete(struct hashtable *table, size_t klen, const void *key)
+void asyncio_hashtable_delete(struct hashtable *table, size_t klen, const void *key)
 {
 	struct hashtable_entry *entry, *prev;
 	size_t bucket;
@@ -174,8 +174,8 @@ void hashtable_delete(struct hashtable *table, size_t klen, const void *key)
 	}
 }
 
-void hashtable_destroy(struct hashtable *table)
+void asyncio_hashtable_destroy(struct hashtable *table)
 {
-	safe_free(table->entries);
-	safe_free(table->buckets);
+	asyncio_safe_free(table->entries);
+	asyncio_safe_free(table->buckets);
 }

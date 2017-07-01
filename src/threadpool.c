@@ -1,16 +1,15 @@
 #include <stdlib.h>
 #include <stdint.h>
+#include <limits.h>
 
 #include <unistd.h>
 #include <signal.h>
 
-#include "threadpool.h"
-#include "cancellations.h"
+#include "asyncio_threadpool.h"
 #include "queue.h"
 #include "safe_malloc.h"
 #include "logging.h"
 #include "threading.h"
-#include "constants.h"
 
 #define MAX_WORKER_THREADS		5
 #define MAX_CONTRACTORS			1024
@@ -21,10 +20,10 @@
 #define NUM_THREADPOOL_QUEUES		3
 
 /* STRUCT DEFINITIONS */
-struct threadpool_handle {
-	uint64_t refcount;
+struct asyncio_threadpool_handle {
+	unsigned long refcount;
 
-	struct threadpool_dispatch_info info;
+	struct asyncio_threadpool_dispatch_info info;
 
 	ASYNCIO_THREAD_T thread;		/* Thread (contractor or worker) executing this task. */
 	struct worker_thread_info *worker_info;	/* Info on worker thread (if in a worker, used for cleanup). */
@@ -38,8 +37,8 @@ struct threadpool_handle {
 
 	/* Used for task queues */
 	/* We need to be able to put handle in multiple queues */
-	struct threadpool_handle *prev[NUM_THREADPOOL_QUEUES];
-	struct threadpool_handle *next[NUM_THREADPOOL_QUEUES];
+	struct asyncio_threadpool_handle *prev[NUM_THREADPOOL_QUEUES];
+	struct asyncio_threadpool_handle *next[NUM_THREADPOOL_QUEUES];
 };
 
 struct worker_thread_info {
@@ -51,8 +50,8 @@ struct worker_thread_info {
 /* PROTOTYPES */
 static void unlock_threadpool_mtx_cleanup(void *arg);
 
-static void notify_handle_finished(struct threadpool_handle *handle);
-static void notify_handle_thread_died(struct threadpool_handle *handle);
+static void notify_handle_finished(struct asyncio_threadpool_handle *handle);
+static void notify_handle_thread_died(struct asyncio_threadpool_handle *handle);
 static void notify_worker_died(struct worker_thread_info *worker_info);
 
 static void contractor_cleanup(void *arg);
@@ -64,17 +63,17 @@ static void *worker_thread(void *arg);
 static void *manager_thread(void *arg);
 static void *reaper_thread(void *arg);
 
-static int push_worker_task_locked(struct threadpool_handle *handle);
-static int pull_worker_task(struct worker_thread_info *worker_info, struct threadpool_handle **handlep, int *stopped);
+static int push_worker_task_locked(struct asyncio_threadpool_handle *handle);
+static int pull_worker_task(struct worker_thread_info *worker_info, struct asyncio_threadpool_handle **handlep, int *stopped);
 
-static void push_reaper_task_locked(struct threadpool_handle *handle);
-static int pull_reaper_task(struct threadpool_handle **handlep, int *stopped);
+static void push_reaper_task_locked(struct asyncio_threadpool_handle *handle);
+static int pull_reaper_task(struct asyncio_threadpool_handle **handlep, int *stopped);
 
-static int dispatch_contractor(struct threadpool_handle *handle);
-static int dispatch_worker(struct threadpool_handle *handle);
+static int dispatch_contractor(struct asyncio_threadpool_handle *handle);
+static int dispatch_worker(struct asyncio_threadpool_handle *handle);
 
-static int init_threadpool_handle(struct threadpool_handle *handle, struct threadpool_dispatch_info *task);
-static void cleanup_threadpool_handle(struct threadpool_handle *handle);
+static int init_threadpool_handle(struct asyncio_threadpool_handle *handle, struct asyncio_threadpool_dispatch_info *task);
+static void cleanup_threadpool_handle(struct asyncio_threadpool_handle *handle);
 
 static void stop_manager_thread(void);
 /* END PROTOTYPES */
@@ -82,24 +81,24 @@ static void stop_manager_thread(void);
 /* GLOBALS */
 static ASYNCIO_RWLOCK_T initialization_lock = ASYNCIO_RWLOCK_INITIALIZER;
 static int threadpool_initialized = 0;
-static uint64_t initialization_count = 0;
+static unsigned long initialization_count = 0;
 
 static ASYNCIO_MUTEX_T threadpool_mtx = ASYNCIO_MUTEX_INITIALIZER;
 static int threadpool_stopped = 0;
 
 static struct worker_thread_info worker_threads[MAX_WORKER_THREADS];
 static ASYNCIO_COND_T workers_newtask_cond = ASYNCIO_COND_INITIALIZER;
-static decl_queue(struct threadpool_handle, workers_task_queue);
+static decl_queue(struct asyncio_threadpool_handle, workers_task_queue);
 
-static uint64_t contractors_count = 0;
+static unsigned long contractors_count = 0;
 
 static ASYNCIO_THREAD_T manager_thread_threadt;
 static ASYNCIO_COND_T respawn_cond = ASYNCIO_COND_INITIALIZER;
 
 static ASYNCIO_THREAD_T reaper_thread_threadt;
 static ASYNCIO_COND_T reaper_cond = ASYNCIO_COND_INITIALIZER;
-static decl_queue(struct threadpool_handle, reaper_immediate_task_queue); /* Handles that will terminate very soon */
-static decl_queue(struct threadpool_handle, reaper_task_queue); /* All existing handles for ultimate cleanup */
+static decl_queue(struct asyncio_threadpool_handle, reaper_immediate_task_queue); /* Handles that will terminate very soon */
+static decl_queue(struct asyncio_threadpool_handle, reaper_task_queue); /* All existing handles for ultimate cleanup */
 
 /* NOTE: Whenever there is a threadpool_release_handle in this module, handle must also be removed from the reaper_task_queue.
  * This doesn't apply to handles still in the workers_task_queue because they are not yet put in the reaper task queue.
@@ -120,7 +119,7 @@ static void unlock_threadpool_mtx_cleanup(void *arg)
 	ASYNCIO_DEBUG_RETURN(VOIDRET);
 }
 
-static void notify_handle_finished(struct threadpool_handle *handle)
+static void notify_handle_finished(struct asyncio_threadpool_handle *handle)
 {
 	/* This function is responsible for ending the handle life cycle through the threadpool module.
 	 * A reference may still be held by users, but it stops existing as far as this module is concerned. */
@@ -136,11 +135,11 @@ static void notify_handle_finished(struct threadpool_handle *handle)
 		ASYNCIO_ERROR("Failed to lock threadpool mtx.\n");
 	}
 
-	threadpool_release_handle(handle);
+	asyncio_threadpool_release_handle(handle);
 	ASYNCIO_DEBUG_RETURN(VOIDRET);
 }
 
-static void notify_handle_thread_died(struct threadpool_handle *handle)
+static void notify_handle_thread_died(struct asyncio_threadpool_handle *handle)
 {
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", handle));
 
@@ -199,12 +198,12 @@ static void notify_worker_died(struct worker_thread_info *worker_info)
 
 static void contractor_cleanup(void *arg)
 {
-	struct threadpool_handle *handle;
+	struct asyncio_threadpool_handle *handle;
 
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", arg));
 
 	/* handle was acquired in contractor_thread */
-	handle = (struct threadpool_handle *)arg;
+	handle = (struct asyncio_threadpool_handle *)arg;
 
 	/* Decrement contractors count */
 	if (ASYNCIO_MUTEX_LOCK(&threadpool_mtx) != 0) {
@@ -231,22 +230,22 @@ static void contractor_cleanup(void *arg)
 
 static void *contractor_thread(void *arg)
 {
-	struct threadpool_handle *handle;
+	struct asyncio_threadpool_handle *handle;
 	int oldstate, oldstate1;
 	int oldtype;
 
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", arg));
 	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
 
-	handle = (struct threadpool_handle *)arg;
+	handle = (struct asyncio_threadpool_handle *)arg;
 	ASYNCIO_CLEANUP_PUSH(contractor_cleanup, handle);
 
-	if (handle->info.flags & THREADPOOL_FLAG_ASYNCCANCEL)
+	if (handle->info.flags & ASYNCIO_THREADPOOL_FLAG_ASYNCCANCEL)
 		ASYNCIO_SET_CANCELTYPE(ASYNCIO_CANCEL_ASYNCHRONOUS, &oldtype);
 	else
 		ASYNCIO_SET_CANCELTYPE(ASYNCIO_CANCEL_DEFERRED, &oldtype);
 
-	if (handle->info.flags & THREADPOOL_FLAG_CANCELLABLE)
+	if (handle->info.flags & ASYNCIO_THREADPOOL_FLAG_CANCELLABLE)
 		ASYNCIO_SET_CANCELSTATE(ASYNCIO_CANCEL_ENABLE, &oldstate1);
 	else
 		ASYNCIO_SET_CANCELSTATE(ASYNCIO_CANCEL_DISABLE, &oldstate1);
@@ -269,12 +268,12 @@ static void *contractor_thread(void *arg)
 
 static void worker_handle_cleanup(void *arg)
 {
-	struct threadpool_handle *handle;
+	struct asyncio_threadpool_handle *handle;
 
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", arg));
 
 	/* handle was acquired in worker_thread */
-	handle = (struct threadpool_handle *)arg;
+	handle = (struct asyncio_threadpool_handle *)arg;
 
 	/* Do not release handle, it will be done by the reaper thread. */
 	notify_handle_thread_died(handle);
@@ -285,7 +284,7 @@ static void worker_handle_cleanup(void *arg)
 static void *worker_thread(void *arg)
 {
 	struct worker_thread_info *worker_info;
-	struct threadpool_handle *handle;
+	struct asyncio_threadpool_handle *handle;
 	int oldstate, oldstate1;
 	int oldtype;
 	int stopped = 0;
@@ -308,12 +307,12 @@ static void *worker_thread(void *arg)
 
 		ASYNCIO_CLEANUP_PUSH(worker_handle_cleanup, handle);
 
-		if (handle->info.flags & THREADPOOL_FLAG_ASYNCCANCEL)
+		if (handle->info.flags & ASYNCIO_THREADPOOL_FLAG_ASYNCCANCEL)
 			ASYNCIO_SET_CANCELTYPE(ASYNCIO_CANCEL_ASYNCHRONOUS, &oldtype);
 		else
 			ASYNCIO_SET_CANCELTYPE(ASYNCIO_CANCEL_DEFERRED, &oldtype);
 
-		if (handle->info.flags & THREADPOOL_FLAG_CANCELLABLE)
+		if (handle->info.flags & ASYNCIO_THREADPOOL_FLAG_CANCELLABLE)
 			ASYNCIO_SET_CANCELSTATE(ASYNCIO_CANCEL_ENABLE, &oldstate1);
 		else
 			ASYNCIO_SET_CANCELSTATE(ASYNCIO_CANCEL_DISABLE, &oldstate1);
@@ -406,7 +405,7 @@ static void *manager_thread(void *arg)
 static void *reaper_thread(void *arg)
 {
 	struct worker_thread_info *worker_info;
-	struct threadpool_handle *handle;
+	struct asyncio_threadpool_handle *handle;
 	int stopped;
 	size_t i;
 	(void)arg;
@@ -492,7 +491,7 @@ static void *reaper_thread(void *arg)
 	return NULL;
 }
 
-static int push_worker_task_locked(struct threadpool_handle *handle)
+static int push_worker_task_locked(struct asyncio_threadpool_handle *handle)
 {
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", handle));
 
@@ -513,9 +512,9 @@ static int push_worker_task_locked(struct threadpool_handle *handle)
 	return 0;
 }
 
-static int pull_worker_task(struct worker_thread_info *worker_info, struct threadpool_handle **handlep, int *stopped)
+static int pull_worker_task(struct worker_thread_info *worker_info, struct asyncio_threadpool_handle **handlep, int *stopped)
 {
-	struct threadpool_handle *handle;
+	struct asyncio_threadpool_handle *handle;
 
 	ASYNCIO_DEBUG_ENTER(3 ARG("%p", worker_info) ARG("%p", handlep) ARG("%p", stopped));
 
@@ -556,7 +555,7 @@ static int pull_worker_task(struct worker_thread_info *worker_info, struct threa
 	return 0;
 }
 
-static void push_reaper_task_locked(struct threadpool_handle *handle)
+static void push_reaper_task_locked(struct asyncio_threadpool_handle *handle)
 {
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", handle));
 
@@ -569,9 +568,9 @@ static void push_reaper_task_locked(struct threadpool_handle *handle)
 	ASYNCIO_DEBUG_RETURN(VOIDRET);
 }
 
-static int pull_reaper_task(struct threadpool_handle **handlep, int *stopped)
+static int pull_reaper_task(struct asyncio_threadpool_handle **handlep, int *stopped)
 {
-	struct threadpool_handle *handle;
+	struct asyncio_threadpool_handle *handle;
 
 	ASYNCIO_DEBUG_ENTER(2 ARG("%p", handlep) ARG("%p", stopped));
 
@@ -606,7 +605,7 @@ static int pull_reaper_task(struct threadpool_handle **handlep, int *stopped)
 	return 0;
 }
 
-static int init_threadpool_handle(struct threadpool_handle *handle, struct threadpool_dispatch_info *task)
+static int init_threadpool_handle(struct asyncio_threadpool_handle *handle, struct asyncio_threadpool_dispatch_info *task)
 {
 	ASYNCIO_DEBUG_ENTER(2 ARG("%p", handle) ARG("%p", task));
 	handle->info = *task;
@@ -628,14 +627,14 @@ static int init_threadpool_handle(struct threadpool_handle *handle, struct threa
 	return 0;
 }
 
-static void cleanup_threadpool_handle(struct threadpool_handle *handle)
+static void cleanup_threadpool_handle(struct asyncio_threadpool_handle *handle)
 {
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", handle));
 	ASYNCIO_COND_DESTROY(&handle->finished_cond);
 	ASYNCIO_DEBUG_RETURN(VOIDRET);
 }
 
-static int dispatch_contractor(struct threadpool_handle *handle)
+static int dispatch_contractor(struct asyncio_threadpool_handle *handle)
 {
 	ASYNCIO_THREAD_T thread;
 
@@ -669,7 +668,7 @@ static int dispatch_contractor(struct threadpool_handle *handle)
 	return -1;
 }
 
-static int dispatch_worker(struct threadpool_handle *handle)
+static int dispatch_worker(struct asyncio_threadpool_handle *handle)
 {
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", handle));
 
@@ -714,7 +713,7 @@ static void stop_manager_thread()
 	ASYNCIO_DEBUG_RETURN(VOIDRET);
 }
 
-int threadpool_init()
+int asyncio_threadpool_init()
 {
 	int oldstate;
 	int rc;
@@ -735,7 +734,7 @@ int threadpool_init()
 		goto return_cancelstate;
 	}
 
-	if (initialization_count == UINT64T_MAX) {
+	if (initialization_count == ULONG_MAX) {
 		ASYNCIO_ERROR("Reached maximal threadpool initialization count.\n");
 		rc = -1;
 		goto return_initialization_lock;
@@ -787,9 +786,9 @@ return_cancelstate:
 	return rc;
 }
 
-int threadpool_dispatch(struct threadpool_dispatch_info *task, threadpool_handle_t *handlep)
+int asyncio_threadpool_dispatch(struct asyncio_threadpool_dispatch_info *task, struct asyncio_threadpool_handle **handlep)
 {
-	struct threadpool_handle *handle;
+	struct asyncio_threadpool_handle *handle;
 	int oldstate;
 	int rc;
 
@@ -812,7 +811,7 @@ int threadpool_dispatch(struct threadpool_dispatch_info *task, threadpool_handle
 		goto return_initialization_lock;
 	}
 
-	handle = safe_malloc(1, sizeof *handle);
+	handle = asyncio_safe_malloc(1, sizeof *handle);
 
 	if (handle == NULL) {
 		ASYNCIO_ERROR("safe_malloc failed.\n");
@@ -835,31 +834,31 @@ int threadpool_dispatch(struct threadpool_dispatch_info *task, threadpool_handle
 	/* Creating contractor threads seems to be much slower than dispatching to
 	 * the fixed number of worker threads, so only use them for tasks that are gonna
 	 * take a long time, to avoid slowing down batch-dispatching. */
-	if (task->flags & THREADPOOL_FLAG_CONTRACTOR) {
+	if (task->flags & ASYNCIO_THREADPOOL_FLAG_CONTRACTOR) {
 		/* Give preference to contractor threads */
 		if (dispatch_contractor(handle) == 0) {
-			*handlep = (threadpool_handle_t)handle;
+			*handlep = handle;
 			rc = 0;
 			goto return_initialization_lock;
 		}
 
 		/* Try with worker thread instead */
 		if (dispatch_worker(handle) == 0) {
-			*handlep = (threadpool_handle_t)handle;
+			*handlep = handle;
 			rc = 0;
 			goto return_initialization_lock;
 		}
 	} else {
 		/* Give preference to worker threads */
 		if (dispatch_worker(handle) == 0) {
-			*handlep = (threadpool_handle_t)handle;
+			*handlep = handle;
 			rc = 0;
 			goto return_initialization_lock;
 		}
 
 		/* Try with contractor thread instead */
 		if (dispatch_contractor(handle) == 0) {
-			*handlep = (threadpool_handle_t)handle;
+			*handlep = handle;
 			rc = 0;
 			goto return_initialization_lock;
 		}
@@ -869,7 +868,7 @@ int threadpool_dispatch(struct threadpool_dispatch_info *task, threadpool_handle
 	rc = -1;
 
 return_free_handle:
-	safe_free(handle);
+	asyncio_safe_free(handle);
 
 return_initialization_lock:
 	ASYNCIO_RWLOCK_UNLOCK(&initialization_lock);
@@ -880,9 +879,8 @@ return_cancelstate:
 	return rc;
 }
 
-int threadpool_cancel(threadpool_handle_t thandle)
+int asyncio_threadpool_cancel(struct asyncio_threadpool_handle *handle)
 {
-	struct threadpool_handle *handle;
 	int oldstate;
 	int rc;
 	int success, removed_from_queue;
@@ -896,10 +894,8 @@ int threadpool_cancel(threadpool_handle_t thandle)
 		goto return_cancelstate;
 	}
 
-	handle = (struct threadpool_handle *)thandle;
-
 	/* Only cancel cancellable threads */
-	if (!(handle->info.flags & THREADPOOL_FLAG_CANCELLABLE)) {
+	if (!(handle->info.flags & ASYNCIO_THREADPOOL_FLAG_CANCELLABLE)) {
 		rc = -1;
 		goto return_initialization_lock;
 	}
@@ -961,9 +957,8 @@ return_cancelstate:
 	return rc;
 }
 
-int threadpool_join(threadpool_handle_t thandle)
+int asyncio_threadpool_join(struct asyncio_threadpool_handle *handle)
 {
-	struct threadpool_handle *handle;
 	int oldstate;
 	int oldtype;
 	int success = 1;
@@ -971,8 +966,6 @@ int threadpool_join(threadpool_handle_t thandle)
 
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", thandle));
 	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
-
-	handle = (struct threadpool_handle *)thandle;
 
 	if (ASYNCIO_MUTEX_LOCK(&threadpool_mtx) != 0) {
 		ASYNCIO_ERROR("Failed to lock threadpool mtx.\n");
@@ -1015,16 +1008,13 @@ return_cancelstate:
 	return rc;
 }
 
-int threadpool_acquire_handle(threadpool_handle_t thandle)
+int asyncio_threadpool_acquire_handle(struct asyncio_threadpool_handle *handle)
 {
-	struct threadpool_handle *handle;
 	int oldstate;
 	int rc;
 
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", thandle));
 	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
-
-	handle = (struct threadpool_handle *)thandle;
 
 	if (ASYNCIO_MUTEX_LOCK(&threadpool_mtx) != 0) {
 		ASYNCIO_ERROR("Failed to lock threadpool mtx.\n");
@@ -1033,7 +1023,7 @@ int threadpool_acquire_handle(threadpool_handle_t thandle)
 	}
 
 	/* Check for overflow */
-	if (handle->refcount >= UINT64T_MAX) {
+	if (handle->refcount >= ULONG_MAX) {
 		ASYNCIO_ERROR("handle refcount overflow.\n");
 		rc = -1;
 		goto return_threadpool_mtx;
@@ -1051,15 +1041,12 @@ return_cancelstate:
 	return rc;
 }
 
-void threadpool_release_handle(threadpool_handle_t thandle)
+void asyncio_threadpool_release_handle(struct asyncio_threadpool_handle *handle)
 {
-	struct threadpool_handle *handle;
 	int oldstate;
 
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", thandle));
 	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
-
-	handle = (struct threadpool_handle *)thandle;
 
 	if (ASYNCIO_MUTEX_LOCK(&threadpool_mtx) != 0) {
 		ASYNCIO_ERROR("Failed to lock threadpool mtx.\n");
@@ -1077,7 +1064,7 @@ void threadpool_release_handle(threadpool_handle_t thandle)
 	if (handle->refcount == 0) {
 		ASYNCIO_MUTEX_UNLOCK(&threadpool_mtx);
 		cleanup_threadpool_handle(handle); /* Don't wanna do this while holding mtx */
-		safe_free(handle);
+		asyncio_safe_free(handle);
 		goto return_cancelstate;
 	}
 
@@ -1089,7 +1076,7 @@ return_cancelstate:
 	ASYNCIO_DEBUG_RETURN(VOIDRET);
 }
 
-void threadpool_cleanup(void)
+void asyncio_threadpool_cleanup(void)
 {
 	int oldstate;
 
@@ -1140,12 +1127,6 @@ void threadpool_cleanup(void)
 
 	/* Join reaper thread */
 	ASYNCIO_THREAD_JOIN(reaper_thread_threadt);
-
-	/* We already unlocked the threadpool mtx above so jump right to next cleanup. */
-	goto return_initialization_lock;
-
-return_threadpool_mtx:
-	ASYNCIO_MUTEX_UNLOCK(&threadpool_mtx);
 
 return_initialization_lock:
 	ASYNCIO_RWLOCK_UNLOCK(&initialization_lock);

@@ -8,8 +8,9 @@
 #endif
 
 #include "logging.h"
+#include "monotonic_gettime.h"
 
-int monotonic_gettime(struct timespec *ts)
+int asyncio_monotonic_gettime(struct timespec *ts)
 {
 #ifdef __MACH__	/* OS X does not have clock_gettime, use clock_get_time */
 	clock_serv_t cclock;

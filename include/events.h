@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#include "threadpool.h"
+#include "asyncio_threadpool.h"
 #include "queue.h"
 #include "threading.h"
 
@@ -19,12 +19,12 @@
 struct events_handle {
 	struct events_loop *eventloop;
 
-	int (*wait)(const struct events_handle *self, int old_cancelstate);
-	int (*cancel)(const struct events_handle *self);
-	int (*acquire)(const struct events_handle *self);
-	int (*release)(const struct events_handle *self);
+	int (*wait)(struct events_handle *self, int old_cancelstate);
+	int (*cancel)(struct events_handle *self);
+	int (*acquire)(struct events_handle *self);
+	void (*release)(struct events_handle *self);
 
-	uint64_t refcount;
+	unsigned long refcount;
 
 	struct events_handle *prev[NUMBER_EVENTS_HANDLE_QUEUES];
 	struct events_handle *next[NUMBER_EVENTS_HANDLE_QUEUES];
@@ -33,38 +33,45 @@ struct events_handle {
 
 	int in_eventloop_database;
 	int has_threadpool_handle;
-	threadpool_handle *th_handle;
+	struct asyncio_threadpool_handle *threadpool_handle;
 
 	int continued;
 	int finished;
 	ASYNCIO_COND_T finished_cond;
 
 	void *instance;
-	void (*backend_cleanup_events_handle)(void *instance);
 };
 
 struct events_loop {
 	struct events_backend *backend;
 
 	ASYNCIO_MUTEX_T mtx;
-	uint64_t refcount;
+	unsigned long refcount;
 	int stopped;
 	int changed;
 
+	struct asyncio_threadpool_handle *threadpool_handle;
 	decl_queue(struct events_handle, all_handles);
 
 	struct events_loop *prev[NUMBER_EVENTS_EVENTLOOP_QUEUES];
 	struct events_loop *next[NUMBER_EVENTS_EVENTLOOP_QUEUES];
 
 	int (*acquire)(struct events_loop *self);
-	int (*release)(struct events_loop *self);
+	void (*release)(struct events_loop *self);
+
+	int (*handle_init)(struct events_loop *eventloop, struct events_handle *handle, uint32_t flags);
+	void (*handle_cleanup_before_dispatch)(struct events_handle *handle);
+
+	int (*dispatch_handle_to_eventloop)(struct events_loop *eventloop, struct events_handle *handle);
+	int (*dispatch_handle_to_threadpool_locked)(struct events_handle *handle);
 
 	void *instance;
 
-	void (*backend_callback)(void *instance, uint32_t flags, int *continued);
+	void (*backend_callback)(void *handle_instance, uint32_t flags, int *continued);
 
 	int (*backend_insert_events_handle_locked)(void *eventloop_instance, void *handle_instance);
 	void (*backend_remove_events_handle_locked)(void *eventloop_instance, void *handle_instance);
+	void (*backend_cleanup_events_handle)(void *instance);
 
 	int (*backend_initialize_eventloop_thread)(void *instance);
 	int (*backend_wait_for_events)(void *instance);
@@ -81,7 +88,7 @@ struct events_loop {
 struct events_backend {
 	ASYNCIO_MUTEX_T mtx;
 	int initialized;
-	uint64_t refcount;
+	unsigned long refcount;
 
 	decl_queue(struct events_loop, all_eventloops);
 
@@ -89,6 +96,10 @@ struct events_backend {
 	struct events_backend *next[NUMBER_EVENTS_BACKEND_QUEUES];
 };
 
-#define EVENTS_BACKEND_INITIALIZER {ASYNCIO_MUTEX_INITIALIZER, 0}
+#define EVENTS_BACKEND_INITIALIZER {ASYNCIO_MUTEX_INITIALIZER, 0, 0, QUEUE_INITIALIZER, {NULL}, {NULL}}
+
+int asyncio_events_backend_init(struct events_backend *backend);
+int asyncio_events_backend_eventloop(struct events_backend *backend, struct events_loop *eventloop);
+void asyncio_events_backend_cleanup(struct events_backend *backend);
 
 #endif

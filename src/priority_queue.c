@@ -29,7 +29,7 @@ static void fix_tree_branch(struct priority_queue *queue, struct prefix_tree_nod
 	}
 }
 
-int priority_queue_init(struct priority_queue *queue, size_t maxentries)
+int asyncio_priority_queue_init(struct priority_queue *queue, size_t maxentries)
 {
 	struct prefix_tree_node *entries;
 	size_t i;
@@ -37,7 +37,7 @@ int priority_queue_init(struct priority_queue *queue, size_t maxentries)
 	if (maxentries == 0)
 		return -1;
 
-	entries = safe_malloc(maxentries, sizeof *entries);
+	entries = asyncio_safe_malloc(maxentries, sizeof *entries);
 
 	if (entries == NULL)
 		return -1;
@@ -56,7 +56,7 @@ int priority_queue_init(struct priority_queue *queue, size_t maxentries)
 	return 0;
 }
 
-int priority_queue_insert(struct priority_queue *queue, uint64_t priority, const void *data)
+int asyncio_priority_queue_insert(struct priority_queue *queue, uint64_t priority, const void *data)
 {
 	struct prefix_tree_node *node;
 	struct prefix_tree_node **nodep;
@@ -96,7 +96,7 @@ int priority_queue_insert(struct priority_queue *queue, uint64_t priority, const
 	return 0;
 }
 
-int priority_queue_modify(struct priority_queue *queue, uint64_t priority, const void *data)
+int asyncio_priority_queue_modify(struct priority_queue *queue, uint64_t priority, const void *data)
 {
 	struct prefix_tree_node **nodep;
 	int i;
@@ -121,7 +121,7 @@ int priority_queue_modify(struct priority_queue *queue, uint64_t priority, const
 	return -1;
 }
 
-int priority_queue_lookup(struct priority_queue *queue, uint64_t priority, const void **datap)
+int asyncio_priority_queue_lookup(struct priority_queue *queue, uint64_t priority, const void **datap)
 {
 	struct prefix_tree_node **nodep;
 	int i;
@@ -146,7 +146,7 @@ int priority_queue_lookup(struct priority_queue *queue, uint64_t priority, const
 	return 0;
 }
 
-int priority_queue_peek(struct priority_queue *queue, uint64_t *priorityp, const void **datap)
+int asyncio_priority_queue_peek(struct priority_queue *queue, uint64_t *priorityp, const void **datap)
 {
 	struct prefix_tree_node **nodep;
 	uint64_t minpri;
@@ -175,7 +175,7 @@ int priority_queue_peek(struct priority_queue *queue, uint64_t *priorityp, const
 	return 0;
 }
 
-int priority_queue_pop(struct priority_queue *queue, uint64_t *priorityp, const void **datap)
+int asyncio_priority_queue_pop(struct priority_queue *queue, uint64_t *priorityp, const void **datap)
 {
 	struct prefix_tree_node **nodep;
 	struct prefix_tree_node **min_nodep;
@@ -207,7 +207,7 @@ int priority_queue_pop(struct priority_queue *queue, uint64_t *priorityp, const 
 	return 0;
 }
 
-void priority_queue_delete(struct priority_queue *queue, uint64_t priority)
+void asyncio_priority_queue_delete(struct priority_queue *queue, uint64_t priority)
 {
 	struct prefix_tree_node **nodep;
 	int i;
@@ -231,7 +231,7 @@ void priority_queue_delete(struct priority_queue *queue, uint64_t priority)
 	}
 }
 
-void priority_queue_destroy(struct priority_queue *queue)
+void asyncio_priority_queue_destroy(struct priority_queue *queue)
 {
-	safe_free(queue->entries);
+	asyncio_safe_free(queue->entries);
 }

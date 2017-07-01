@@ -21,7 +21,7 @@ int ASYNCIO_THREAD_CREATE(ASYNCIO_THREAD_T *thread, void *(start_routine)(void *
 	return 0;
 }
 
-int ASYNCIO_THREAD_JOIN(ASYNCIO_THREAD_T thread);
+int ASYNCIO_THREAD_JOIN(ASYNCIO_THREAD_T thread)
 {
 	int rc;
 
@@ -37,7 +37,6 @@ int ASYNCIO_THREAD_JOIN(ASYNCIO_THREAD_T thread);
 	ASYNCIO_DEBUG_RETURN(RET("%d", 0));
 	return 0;
 }
-
 
 int ASYNCIO_THREAD_CANCEL(ASYNCIO_THREAD_T thread)
 {

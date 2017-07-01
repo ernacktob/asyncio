@@ -3,6 +3,8 @@
 
 #include <stddef.h>
 
+#define QUEUE_INITIALIZER {NULL, NULL, 0, 0}
+
 #define decl_queue(type, name) \
 	struct {\
 		type *first;\
