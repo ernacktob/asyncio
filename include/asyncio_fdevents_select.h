@@ -1,0 +1,12 @@
+#ifndef ASYNCIO_FDEVENTS_SELECT_H
+#define ASYNCIO_FDEVENTS_SELECT_H
+
+#define ASYNCIO_FDEVENTS_SELECT_READABLE	0
+#define ASYNCIO_FDEVENTS_SELECT_WRITABLE	1
+#define ASYNCIO_FDEVENTS_SELECT_ERRORED		2
+
+struct asyncio_fdevents_select_evinfo {
+	int events;
+};
+
+#endif

@@ -29,7 +29,7 @@ struct events_handle {
 	struct events_handle *prev[NUMBER_EVENTS_HANDLE_QUEUES];
 	struct events_handle *next[NUMBER_EVENTS_HANDLE_QUEUES];
 
-	uint32_t flags;
+	uint32_t threadpool_flags;
 
 	int in_eventloop_database;
 	int has_threadpool_handle;
@@ -59,7 +59,7 @@ struct events_loop {
 	int (*acquire)(struct events_loop *self);
 	void (*release)(struct events_loop *self);
 
-	int (*handle_init)(struct events_loop *eventloop, struct events_handle *handle, uint32_t flags);
+	int (*handle_init)(struct events_loop *eventloop, struct events_handle *handle, uint32_t threadpool_flags);
 	void (*handle_cleanup_before_dispatch)(struct events_handle *handle);
 
 	int (*dispatch_handle_to_eventloop)(struct events_loop *eventloop, struct events_handle *handle);
@@ -67,11 +67,11 @@ struct events_loop {
 
 	void *instance;
 
-	void (*backend_callback)(void *handle_instance, uint32_t flags, int *continued);
+	void (*backend_callback)(void *handle_instance, uint32_t threadpool_flags, int *continued);
 
 	int (*backend_insert_events_handle_locked)(void *eventloop_instance, void *handle_instance);
 	void (*backend_remove_events_handle_locked)(void *eventloop_instance, void *handle_instance);
-	void (*backend_cleanup_events_handle)(void *instance);
+	void (*backend_cleanup_events_handle)(void *eventloop_instance, void *handle_instance);
 
 	int (*backend_initialize_eventloop_thread)(void *instance);
 	int (*backend_wait_for_events)(void *instance);

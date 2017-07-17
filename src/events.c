@@ -16,7 +16,7 @@ static void notify_events_handle_finished(struct events_handle *handle);
 static void fatal_error_on_handle(struct events_handle *handle);
 
 static int events_dispatch_handle_to_eventloop(struct events_loop *eventloop, struct events_handle *handle);
-static int events_handle_init(struct events_loop *eventloop, struct events_handle *handle, uint32_t flags);
+static int events_handle_init(struct events_loop *eventloop, struct events_handle *handle, uint32_t threadpool_flags);
 static void events_handle_cleanup_before_dispatch(struct events_handle *handle);
 
 static void execute_events_callback(void *arg);
@@ -111,7 +111,7 @@ static int events_dispatch_handle_to_eventloop(struct events_loop *eventloop, st
 	return 0;
 }
 
-static int events_handle_init(struct events_loop *eventloop, struct events_handle *handle, uint32_t flags)
+static int events_handle_init(struct events_loop *eventloop, struct events_handle *handle, uint32_t threadpool_flags)
 {
 	handle->eventloop = eventloop;
 
@@ -126,7 +126,7 @@ static int events_handle_init(struct events_loop *eventloop, struct events_handl
 	 * prevent the case where the client releases its handle before the loop
 	 * manages to acquire its handle */
 	handle->refcount = 2;
-	handle->flags = flags;
+	handle->threadpool_flags = threadpool_flags;
 	handle->in_eventloop_database = 0;
 	handle->has_threadpool_handle = 0;
 	handle->continued = 0;
@@ -150,11 +150,11 @@ static void execute_events_callback(void *arg)
 {
 	struct events_handle *handle;
 
-	handle = (struct events_handle *)arg;	/* XXX explicit cast? */
+	handle = arg;
 	handle->continued = 0;
 
 	/* Execute the backend callback */
-	handle->eventloop->backend_callback(handle->instance, handle->flags, &handle->continued);
+	handle->eventloop->backend_callback(handle->instance, handle->threadpool_flags, &handle->continued);
 }
 
 static void events_threadpool_completed(void *arg)
@@ -202,7 +202,7 @@ static int events_dispatch_handle_to_threadpool_locked(struct events_handle *han
 
 	info.flags = ASYNCIO_THREADPOOL_FLAG_NONE;
 
-	if (handle->flags & ASYNCIO_THREADPOOL_FLAG_CONTRACTOR) {
+	if (handle->threadpool_flags & ASYNCIO_THREADPOOL_FLAG_CONTRACTOR) {
 		/* Do not use CANCELLATIONS here, because we don't want
 		 * execute_events_callback to be cancellable. It will set the user
 		 * desired cancellation state/type there. */
@@ -428,7 +428,7 @@ static void events_handle_release(struct events_handle *handle)
 	ASYNCIO_MUTEX_UNLOCK(&handle->eventloop->mtx);
 
 	ASYNCIO_COND_DESTROY(&handle->finished_cond);
-	handle->eventloop->backend_cleanup_events_handle(handle->instance);
+	handle->eventloop->backend_cleanup_events_handle(handle->eventloop->instance, handle->instance);
 }
 
 static int events_eventloop_acquire(struct events_loop *eventloop)

@@ -1,12 +1,11 @@
-#include <stdlib.h>
-#include <string.h>
+#include <stddef.h>
 
 #include "hashtable.h"
 #include "safe_malloc.h"
 
 /* PROTOTYPES */
 static unsigned long djb2_hash(const unsigned char *data, size_t len);
-static size_t findbucket(const void *key, size_t klen, size_t nbuckets);
+static size_t findbucket(int key, size_t nbuckets);
 /* END PROTOTYPES */
 
 static unsigned long djb2_hash(const unsigned char *data, size_t len)
@@ -20,12 +19,13 @@ static unsigned long djb2_hash(const unsigned char *data, size_t len)
 	return hash;
 }
 
-static size_t findbucket(const void *key, size_t klen, size_t nbuckets)
+static size_t findbucket(int key, size_t nbuckets)
 {
 	size_t bucket;
 	unsigned long hash;
 
-	hash = djb2_hash((const unsigned char *)key, klen);
+	/* XXX Could use a less general purpose hash from now on... */
+	hash = djb2_hash((const unsigned char *)&key, sizeof key);
 	bucket = ((size_t)hash) % nbuckets;
 
 	return bucket;
@@ -72,7 +72,7 @@ int asyncio_hashtable_init(struct hashtable *table, size_t maxentries)
 	return 0;
 }
 
-int asyncio_hashtable_insert(struct hashtable *table, size_t klen, const void *key, const void *value)
+int asyncio_hashtable_insert(struct hashtable *table, int key, size_t value)
 {
 	struct hashtable_entry *entry, *prev;
 	size_t bucket;
@@ -80,13 +80,13 @@ int asyncio_hashtable_insert(struct hashtable *table, size_t klen, const void *k
 	if (table->nentries == table->maxentries)
 		return -1;
 
-	bucket = findbucket(key, klen, table->nbuckets);
+	bucket = findbucket(key, table->nbuckets);
 
 	prev = NULL;
 	entry = table->buckets[bucket];
 
 	while (entry != NULL) {
-		if (memcmp(entry->key, key, klen) == 0)
+		if (entry->key == key)
 			return -1;
 
 		prev = entry;
@@ -100,7 +100,6 @@ int asyncio_hashtable_insert(struct hashtable *table, size_t klen, const void *k
 	else
 		prev->bucket_next = entry;
 
-	entry->klen = klen;
 	entry->key = key;
 	entry->value = value;
 	entry->bucket_next = NULL;
@@ -111,16 +110,16 @@ int asyncio_hashtable_insert(struct hashtable *table, size_t klen, const void *k
 	return 0;
 }
 
-int asyncio_hashtable_modify(struct hashtable *table, size_t klen, const void *key, const void *value)
+int asyncio_hashtable_modify(struct hashtable *table, int key, size_t value)
 {
 	struct hashtable_entry *entry;
 	size_t bucket;
 
-	bucket = findbucket(key, klen, table->nbuckets);
+	bucket = findbucket(key, table->nbuckets);
 	entry = table->buckets[bucket];
 
 	while (entry != NULL) {
-		if (memcmp(entry->key, key, klen) == 0) {
+		if (entry->key == key) {
 			entry->value = value;
 			return 0;
 		}
@@ -131,45 +130,41 @@ int asyncio_hashtable_modify(struct hashtable *table, size_t klen, const void *k
 	return -1;
 }
 
-int asyncio_hashtable_lookup(struct hashtable *table, size_t klen, const void *key, const void **valuep)
+int asyncio_hashtable_lookup(struct hashtable *table, int key, size_t *valuep)
 {
 	struct hashtable_entry *entry;
 	size_t bucket;
 
-	bucket = findbucket(key, klen, table->nbuckets);
+	bucket = findbucket(key, table->nbuckets);
 
 	for (entry = table->buckets[bucket]; entry != NULL; entry = entry->bucket_next) {
-		if (entry->klen == klen) {
-			if (memcmp(entry->key, key, klen) == 0) {
-				*valuep = entry->value;
-				return 1;
-			}
+		if (entry->key == key) {
+			*valuep = entry->value;
+			return 1;
 		}
 	}
 
 	return 0;
 }
 
-void asyncio_hashtable_delete(struct hashtable *table, size_t klen, const void *key)
+void asyncio_hashtable_delete(struct hashtable *table, int key)
 {
 	struct hashtable_entry *entry, *prev;
 	size_t bucket;
 
-	bucket = findbucket(key, klen, table->nbuckets);
+	bucket = findbucket(key, table->nbuckets);
 
 	for (prev = NULL, entry = table->buckets[bucket]; entry != NULL; prev = entry, entry = entry->bucket_next) {
-		if (entry->klen == klen) {
-			if (memcmp(entry->key, key, klen) == 0) {
-				if (prev == NULL)
-					table->buckets[bucket] = entry->bucket_next;
-				else
-					prev->bucket_next = entry->bucket_next;
+		if (entry->key == key) {
+			if (prev == NULL)
+				table->buckets[bucket] = entry->bucket_next;
+			else
+				prev->bucket_next = entry->bucket_next;
 
-				entry->memory_next = table->first;
-				table->first = entry;
-				--(table->nentries);
-				break;
-			}
+			entry->memory_next = table->first;
+			table->first = entry;
+			--(table->nentries);
+			break;
 		}
 	}
 }

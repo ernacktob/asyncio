@@ -4,25 +4,21 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define ASYNCIO_FDEVENTS_EVENT_READ		(1 << 0)
-#define ASYNCIO_FDEVENTS_EVENT_WRITE		(1 << 1)
-#define ASYNCIO_FDEVENTS_EVENT_ERROR		(1 << 2)
+#include "asyncio_fdevents_poll.h"
+#include "asyncio_fdevents_select.h"
+
+#define ASYNCIO_FDEVENTS_BACKEND_POLL		0
+#define ASYNCIO_FDEVENTS_BACKEND_SELECT		1
+#define ASYNCIO_FDEVENTS_MAX_BACKEND_TYPES	2
 
 struct asyncio_fdevents_handle_priv;
 struct asyncio_fdevents_loop_priv;
 
-typedef void (*asyncio_fdevents_callback)(int fd, uint16_t revents, void *arg, int *continued);
-
-struct asyncio_fdevents_info {
-	int fd;
-	uint16_t events;
-	uint32_t flags;
-	asyncio_fdevents_callback cb;	/* Called when event occurs */
-	void *arg;
-};
+typedef void (*asyncio_fdevents_callback)(int fd, const void *revinfo, void *arg, int *continued);
 
 struct asyncio_fdevents_options {
 	size_t max_nfds;
+	unsigned int backend_type;
 };
 
 struct asyncio_fdevents_handle {
@@ -38,7 +34,7 @@ struct asyncio_fdevents_loop {
 	struct asyncio_fdevents_loop_priv *priv;
 
 	int (*acquire)(const struct asyncio_fdevents_loop *self);
-	int (*listen)(struct asyncio_fdevents_loop *self, const struct asyncio_fdevents_info *info, struct asyncio_fdevents_handle **handlep);
+	int (*listen)(struct asyncio_fdevents_loop *self, int fd, const void *evinfo, asyncio_fdevents_callback cb, void *arg, uint32_t threadpool_flags, struct asyncio_fdevents_handle **handlep);
 	void (*release)(const struct asyncio_fdevents_loop *self);
 };
 

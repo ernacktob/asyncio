@@ -4,8 +4,11 @@
 #include <unistd.h>
 #include <fcntl.h>
 
+#include "fdevents_poll_backend.h"
+#include "fdevents_select_backend.h"
 #include "fdevents_priv.h"
 #include "events.h"
+#include "asyncio_fdevents.h"
 #include "asyncio_threadpool.h"
 #include "queue.h"
 #include "threading.h"
@@ -17,27 +20,17 @@
 /* PROTOTYPES */
 static int set_nonblocking(int fd);
 
-static uint16_t to_fdevents_events(short poll_events);
-static short to_poll_events(uint16_t events);
-
-static void copy_fdevents_scratch_locked(struct asyncio_fdevents_loop_priv *fdeventloop_priv);
-
-static void init_fdevents_refcount_locked(struct fdevents_refcount *refcounts);
-static int increment_fdevents_refcount_locked(struct fdevents_refcount *refcounts, short events);
-static void decrement_fdevents_refcount_locked(struct fdevents_refcount *refcounts, short events);
-static short get_eventsmask_from_fdevents_refcount_locked(const struct fdevents_refcount *refcounts);
-
 static int fdevents_insert_handle_locked(void *eventloop_instance, void *handle_instance);
 static void fdevents_remove_handle_locked(void *eventloop_instance, void *handle_instance);
 
-static void fdevents_cleanup_events_handle(void *instance);
+static void fdevents_cleanup_events_handle(void *eventloop_instance, void *handle_instance);
 
 static int fdevents_handle_wait(const struct asyncio_fdevents_handle *handle); /* PUBLIC */
 static int fdevents_handle_cancel(const struct asyncio_fdevents_handle *handle); /* PUBLIC */
 static int fdevents_handle_acquire(const struct asyncio_fdevents_handle *handle); /* PUBLIC */
 static void fdevents_handle_release(const struct asyncio_fdevents_handle *handle); /* PUBLIC */
 
-static void fdevents_handle_callback(void *handle_instance, uint32_t flags, int *continued);
+static void fdevents_handle_callback(void *handle_instance, uint32_t threadpool_flags, int *continued);
 
 static int fdevents_initialize_eventloop_thread(void *instance);
 static int fdevents_wait_for_events(void *instance);
@@ -46,7 +39,7 @@ static void fdevents_scan_for_events_locked(void *instance);
 static void fdevents_continue_eventloop_thread_locked(void *instance);
 static void fdevents_cleanup_eventloop_thread(void *instance);
 
-static int fdevents_eventloop_listen(struct asyncio_fdevents_loop *fdeventloop, const struct asyncio_fdevents_info *info, struct asyncio_fdevents_handle **handlep); /* PUBLIC */
+static int fdevents_eventloop_listen(struct asyncio_fdevents_loop *fdeventloop, int fd, const void *evinfo, asyncio_fdevents_callback cb, void *arg, uint32_t threadpool_flags, struct asyncio_fdevents_handle **handlep); /* PUBLIC */
 static int fdevents_eventloop_acquire(const struct asyncio_fdevents_loop *fdeventloop); /* PUBLIC */
 static void fdevents_eventloop_release(const struct asyncio_fdevents_loop *fdeventloop); /* PUBLIC */
 
@@ -58,9 +51,8 @@ static void fdevents_cleanup_eventloop(void *instance);
 
 /* GLOBALS */
 static struct events_backend fdevents_backend = EVENTS_BACKEND_INITIALIZER;
+static struct fdevents_backend_ops *fdevents_backend_ops_list[ASYNCIO_FDEVENTS_MAX_BACKEND_TYPES] = {NULL};
 /* END GLOBALS */
-
-#define SET_IF_SET(e1, f1, e2, f2) do {if ((e2) & (f2)) { (e1) |= (f1); }} while (0)
 
 static int set_nonblocking(int fd)
 {
@@ -76,156 +68,40 @@ static int set_nonblocking(int fd)
 	return 0;
 }
 
-static uint16_t to_fdevents_events(short poll_events)
-{
-	uint16_t events;
-
-	events = 0;
-	SET_IF_SET(events, ASYNCIO_FDEVENTS_EVENT_READ, poll_events, POLLIN | POLLPRI);
-	SET_IF_SET(events, ASYNCIO_FDEVENTS_EVENT_WRITE, poll_events, POLLOUT);
-	SET_IF_SET(events, ASYNCIO_FDEVENTS_EVENT_ERROR, poll_events, POLLERR | POLLHUP | POLLNVAL);
-
-	return events;
-}
-
-static short to_poll_events(uint16_t events)
-{
-	short poll_events;
-
-	poll_events = 0;
-	SET_IF_SET(poll_events, POLLIN | POLLPRI, events, ASYNCIO_FDEVENTS_EVENT_READ);
-	SET_IF_SET(poll_events, POLLOUT, events, ASYNCIO_FDEVENTS_EVENT_WRITE);
-	SET_IF_SET(poll_events, POLLERR | POLLHUP | POLLNVAL, events, ASYNCIO_FDEVENTS_EVENT_ERROR);
-
-	return poll_events;
-}
-
-static void copy_fdevents_scratch_locked(struct asyncio_fdevents_loop_priv *fdeventloop_priv)
-{
-	nfds_t i;
-
-	for (i = 0; i < fdeventloop_priv->nfds; i++)
-		fdeventloop_priv->scratch_fds[i] = fdeventloop_priv->fds[i];
-
-	fdeventloop_priv->scratch_nfds = fdeventloop_priv->nfds;
-}
-
-static void init_fdevents_refcount_locked(struct fdevents_refcount *refcounts)
-{
-	unsigned int i;
-
-	COMPILE_TIME_ASSERT(UINT_MAX > POLLFD_EVENT_NBITS);
-
-	for (i = 0; i < POLLFD_EVENT_NBITS; i++)
-		refcounts->bitcounts[i] = 0;
-}
-
-static int increment_fdevents_refcount_locked(struct fdevents_refcount *refcounts, short events)
-{
-	unsigned int i;
-
-	COMPILE_TIME_ASSERT(UINT_MAX > POLLFD_EVENT_NBITS);
-
-	/* First check that we can increment without overflows */
-	for (i = 0; i < POLLFD_EVENT_NBITS; i++) {
-		if ((events & (1 << i)) && (refcounts->bitcounts[i] == UINT_MAX)) {
-			ASYNCIO_ERROR("Reached maximum count for fdevents refcounts.\n");
-			return -1;
-		}
-	}
-
-	for (i = 0; i < POLLFD_EVENT_NBITS; i++) {
-		if (events & (1 << i))
-			++(refcounts->bitcounts[i]);
-	}
-
-	return 0;
-}
-
-static void decrement_fdevents_refcount_locked(struct fdevents_refcount *refcounts, short events)
-{
-	unsigned int i;
-
-	COMPILE_TIME_ASSERT(UINT_MAX > POLLFD_EVENT_NBITS);
-
-	/* First check that we can decrement without underflows */
-	for (i = 0; i < POLLFD_EVENT_NBITS; i++) {
-		if ((events & (1 << i)) && (refcounts->bitcounts[i] == 0)) {
-			ASYNCIO_ERROR("fdevents_refcount bitcounts is zero before decrement.\n");
-			return;
-		}
-	}
-
-	for (i = 0; i < POLLFD_EVENT_NBITS; i++) {
-		if (events & (1 << i))
-			--(refcounts->bitcounts[i]);
-	}
-}
-
-static short get_eventsmask_from_fdevents_refcount_locked(const struct fdevents_refcount *refcounts)
-{
-	short events;
-	unsigned int i;
-
-	COMPILE_TIME_ASSERT(UINT_MAX > POLLFD_EVENT_NBITS);
-
-	events = 0;
-
-	for (i = 0; i < POLLFD_EVENT_NBITS; i++) {
-		if (refcounts->bitcounts[i] > 0)
-			events |= (1 << i);
-	}
-
-	return events;
-}
-
 static int fdevents_insert_handle_locked(void *eventloop_instance, void *handle_instance)
 {
 	struct asyncio_fdevents_loop_priv *fdeventloop_priv;
 	struct asyncio_fdevents_handle_priv *fdhandle_priv;
-	decl_queue(struct asyncio_fdevents_handle_priv, *cbqueue);
 	size_t index;
 
-	fdeventloop_priv = (struct asyncio_fdevents_loop_priv *)eventloop_instance;
-	fdhandle_priv = (struct asyncio_fdevents_handle_priv *)handle_instance;
+	fdeventloop_priv = eventloop_instance;
+	fdhandle_priv = handle_instance;
 
-	/* The fd is already in the database, just add handle to queue and increment events refcounts */
-	if (asyncio_hashtable_lookup(&fdeventloop_priv->fd_map, sizeof fdhandle_priv->fd, &fdhandle_priv->fd, (const void **)&cbqueue)) {
-		index = ((unsigned char *)cbqueue - (unsigned char *)&fdeventloop_priv->callbacks[0]) / sizeof *cbqueue;
-
-		/* Too many events in this fdevents callback queue */
-		if (increment_fdevents_refcount_locked(&fdeventloop_priv->fdevents_refcounts[index], fdhandle_priv->events) != 0)
+	/* The fd is already in the database, just add handle to queue and acquire evinfo */
+	if (asyncio_hashtable_lookup(&fdeventloop_priv->fd_map, fdhandle_priv->fd, &index)) {
+		if (fdeventloop_priv->backend_ops->acquire_evinfo_locked(fdeventloop_priv->backend_data, fdhandle_priv->fd, fdhandle_priv->evinfo)) {
+			/* ASYNCIO_ERROR("The fdevents backend cannot acquire the evinfo for this fd.\n"); */
 			return -1;
+		}
 
-		queue_push(cbqueue, fdhandle_priv);
-		fdeventloop_priv->fds[index].events |= fdhandle_priv->events;
+		queue_push(&fdeventloop_priv->callbacks[index], fdhandle_priv);
 	} else {
-		if (fdeventloop_priv->nfds == fdeventloop_priv->max_nfds) {
-			ASYNCIO_ERROR("fdeventloop nfds reached max_nfds.\n");
+		if (fdeventloop_priv->backend_ops->insert_fd_locked(fdeventloop_priv->backend_data, fdhandle_priv->fd, fdhandle_priv->evinfo) != 0) {
+			ASYNCIO_ERROR("Failed to insert new fd in fdevents backend database.\n");
 			return -1;
 		}
 
-		cbqueue = (void *)&fdeventloop_priv->callbacks[fdeventloop_priv->nfds];
+		index = fdeventloop_priv->last;
 
-		if (asyncio_hashtable_insert(&fdeventloop_priv->fd_map, sizeof fdhandle_priv->fd, &fdhandle_priv->fd, cbqueue) != 0) {
+		if (asyncio_hashtable_insert(&fdeventloop_priv->fd_map, fdhandle_priv->fd, index) != 0) {
 			ASYNCIO_ERROR("Failed to insert fd in hashtable.\n");
+			fdeventloop_priv->backend_ops->remove_fd_locked(fdeventloop_priv->backend_data, fdhandle_priv->fd);
 			return -1;
 		}
 
-		init_fdevents_refcount_locked(&fdeventloop_priv->fdevents_refcounts[fdeventloop_priv->nfds]);
-
-		if (increment_fdevents_refcount_locked(&fdeventloop_priv->fdevents_refcounts[fdeventloop_priv->nfds], fdhandle_priv->events) != 0) {
-			ASYNCIO_ERROR("Failed to increment fdevents refcount.\n");
-			asyncio_hashtable_delete(&fdeventloop_priv->fd_map, sizeof fdhandle_priv->fd, &fdhandle_priv->fd);
-			return -1;
-		}
-
-		queue_init(cbqueue, FDEVENTS_HANDLE_QUEUE_ID);
-		queue_push(cbqueue, fdhandle_priv);
-
-		fdeventloop_priv->fds[fdeventloop_priv->nfds].fd = fdhandle_priv->fd;
-		fdeventloop_priv->fds[fdeventloop_priv->nfds].events = fdhandle_priv->events;
-		++(fdeventloop_priv->nfds);
+		queue_init(&fdeventloop_priv->callbacks[index], FDEVENTS_HANDLE_QUEUE_ID);
+		queue_push(&fdeventloop_priv->callbacks[index], fdhandle_priv);
+		++(fdeventloop_priv->last);
 	}
 
 	return 0;
@@ -234,42 +110,51 @@ static int fdevents_insert_handle_locked(void *eventloop_instance, void *handle_
 static void fdevents_remove_handle_locked(void *eventloop_instance, void *handle_instance)
 {
 	struct asyncio_fdevents_loop_priv *fdeventloop_priv;
-	struct asyncio_fdevents_handle_priv *fdhandle_priv;
-	decl_queue(struct asyncio_fdevents_handle_priv, *cbqueue);
-	size_t index;
-	nfds_t last;
+	struct asyncio_fdevents_handle_priv *fdhandle_priv, *last_fdhandle;
+	size_t index, last_valid_index;
 
-	/* XXX Explicit casting? */
-	fdeventloop_priv = (struct asyncio_fdevents_loop_priv *)eventloop_instance;
-	fdhandle_priv = (struct asyncio_fdevents_handle_priv *)handle_instance;
+	fdeventloop_priv = eventloop_instance;
+	fdhandle_priv = handle_instance;
 
-	if (!asyncio_hashtable_lookup(&fdeventloop_priv->fd_map, sizeof fdhandle_priv->fd, &fdhandle_priv->fd, (const void **)&cbqueue)) {
+	if (fdeventloop_priv->last == 0) {
+		ASYNCIO_ERROR("Tried to remove handle from fdeventloop with last == 0. Should not happen.\n");
+		return;
+	}
+
+	if (!asyncio_hashtable_lookup(&fdeventloop_priv->fd_map, fdhandle_priv->fd, &index)) {
 		ASYNCIO_ERROR("Tried to remove handle not in the fdeventloop queue.\n");
 		return;
 	}
 
-	last = fdeventloop_priv->nfds - 1;
-	index = ((unsigned char *)cbqueue - (unsigned char *)&fdeventloop_priv->callbacks[0]) / sizeof *cbqueue;
-	decrement_fdevents_refcount_locked(&fdeventloop_priv->fdevents_refcounts[index], fdhandle_priv->events);
-	queue_remove(cbqueue, fdhandle_priv);
+	fdeventloop_priv->backend_ops->release_evinfo_locked(fdeventloop_priv->backend_data, fdhandle_priv->fd, fdhandle_priv->evinfo);
+	queue_remove(&fdeventloop_priv->callbacks[index], fdhandle_priv);
 
-	if (queue_empty(cbqueue)) {
-		asyncio_hashtable_delete(&fdeventloop_priv->fd_map, sizeof fdhandle_priv->fd, &fdhandle_priv->fd);
-		fdeventloop_priv->fds[index] = fdeventloop_priv->fds[last];
-		fdeventloop_priv->callbacks[index] = fdeventloop_priv->callbacks[last];
-		fdeventloop_priv->fdevents_refcounts[index] = fdeventloop_priv->fdevents_refcounts[last];
-		asyncio_hashtable_modify(&fdeventloop_priv->fd_map, sizeof fdeventloop_priv->fds[last].fd, &fdeventloop_priv->fds[last].fd, cbqueue); /* This can't fail */
-		--(fdeventloop_priv->nfds);
-	} else {
-		fdeventloop_priv->fds[index].events = get_eventsmask_from_fdevents_refcount_locked(&fdeventloop_priv->fdevents_refcounts[index]);
+	if (queue_empty(&fdeventloop_priv->callbacks[index])) {
+		asyncio_hashtable_delete(&fdeventloop_priv->fd_map, fdhandle_priv->fd);
+		fdeventloop_priv->backend_ops->remove_fd_locked(fdeventloop_priv->backend_data, fdhandle_priv->fd);
+
+		last_valid_index = fdeventloop_priv->last - 1;
+
+		/* Swap the last callback queue into the released slot to keep all valid queues consecutive. */
+		if (index < last_valid_index) {
+			last_fdhandle = queue_first(&fdeventloop_priv->callbacks[last_valid_index]);
+			asyncio_hashtable_modify(&fdeventloop_priv->fd_map, last_fdhandle->fd, index);	/* This can't fail. */
+			fdeventloop_priv->callbacks[index] = fdeventloop_priv->callbacks[last_valid_index];
+		}
+
+		--(fdeventloop_priv->last);
 	}
 }
 
-static void fdevents_cleanup_events_handle(void *instance)
+static void fdevents_cleanup_events_handle(void *eventloop_instance, void *handle_instance)
 {
+	struct asyncio_fdevents_loop_priv *fdeventloop_priv;
 	struct asyncio_fdevents_handle_priv *fdhandle_priv;
 
-	fdhandle_priv = instance;
+	fdeventloop_priv = eventloop_instance;
+	fdhandle_priv = handle_instance;
+
+	fdeventloop_priv->backend_ops->cleanup_evinfo_revinfo(fdhandle_priv->evinfo, fdhandle_priv->revinfo);
 	asyncio_safe_free(fdhandle_priv);
 }
 
@@ -322,7 +207,7 @@ static void fdevents_handle_release(const struct asyncio_fdevents_handle *handle
 	ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 }
 
-static void fdevents_handle_callback(void *handle_instance, uint32_t flags, int *continued)
+static void fdevents_handle_callback(void *handle_instance, uint32_t threadpool_flags, int *continued)
 {
 	struct asyncio_fdevents_handle_priv *fdhandle_priv;
 	int oldtype;
@@ -331,17 +216,17 @@ static void fdevents_handle_callback(void *handle_instance, uint32_t flags, int 
 	fdhandle_priv = handle_instance;
 
 	/* Set user-defined cancellation settings */
-	if (flags & ASYNCIO_THREADPOOL_FLAG_ASYNCCANCEL)
+	if (threadpool_flags & ASYNCIO_THREADPOOL_FLAG_ASYNCCANCEL)
 		ASYNCIO_SET_CANCELTYPE(ASYNCIO_CANCEL_ASYNCHRONOUS, &oldtype);
 	else
 		ASYNCIO_SET_CANCELTYPE(ASYNCIO_CANCEL_DEFERRED, &oldtype);
 
-	if (flags & ASYNCIO_THREADPOOL_FLAG_CANCELLABLE)
+	if (threadpool_flags & ASYNCIO_THREADPOOL_FLAG_CANCELLABLE)
 		ASYNCIO_SET_CANCELSTATE(ASYNCIO_CANCEL_ENABLE, &oldstate);
 	else
 		ASYNCIO_SET_CANCELSTATE(ASYNCIO_CANCEL_DISABLE, &oldstate);
 
-	fdhandle_priv->callback_fn(fdhandle_priv->fd, to_fdevents_events(fdhandle_priv->revents), fdhandle_priv->callback_arg, continued);
+	fdhandle_priv->callback_fn(fdhandle_priv->fd, fdhandle_priv->revinfo, fdhandle_priv->callback_arg, continued);
 
 	ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 	ASYNCIO_RESTORE_CANCELTYPE(oldtype);
@@ -352,10 +237,7 @@ static int fdevents_initialize_eventloop_thread(void *instance)
 	struct asyncio_fdevents_loop_priv *fdeventloop_priv;
 
 	fdeventloop_priv = instance;
-
-	copy_fdevents_scratch_locked(fdeventloop_priv);
-
-	return 0;
+	return fdeventloop_priv->backend_ops->initialize_eventloop_thread(fdeventloop_priv->backend_data);
 }
 
 static int fdevents_wait_for_events(void *instance)
@@ -363,13 +245,7 @@ static int fdevents_wait_for_events(void *instance)
 	struct asyncio_fdevents_loop_priv *fdeventloop_priv;
 
 	fdeventloop_priv = instance;
-
-	if (poll(fdeventloop_priv->scratch_fds, fdeventloop_priv->scratch_nfds, -1) < 0) {
-		ASYNCIO_SYSERROR("poll");
-		return -1;
-	}
-
-	return 0;
+	return fdeventloop_priv->backend_ops->wait_for_events(fdeventloop_priv->backend_data);
 }
 
 static void fdevents_process_changed_events_locked(void *instance)
@@ -377,31 +253,38 @@ static void fdevents_process_changed_events_locked(void *instance)
 	struct asyncio_fdevents_loop_priv *fdeventloop_priv;
 
 	fdeventloop_priv = instance;
-	copy_fdevents_scratch_locked(fdeventloop_priv);
+	fdeventloop_priv->backend_ops->process_changed_events_locked(fdeventloop_priv->backend_data);
 }
 
 static void fdevents_scan_for_events_locked(void *instance)
 {
 	struct asyncio_fdevents_loop_priv *fdeventloop_priv;
 	struct asyncio_fdevents_handle_priv *fdhandle_priv, *next;
-	nfds_t i;
+	size_t index;
+	int fd;
 
 	fdeventloop_priv = instance;
+	fdeventloop_priv->backend_ops->scan_for_events_init_locked(fdeventloop_priv->backend_data);
 
-	for (i = 0; i < fdeventloop_priv->scratch_nfds; i++) {
-		if (fdeventloop_priv->scratch_fds[i].revents & (fdeventloop_priv->scratch_fds[i].events | POLLERR | POLLHUP | POLLNVAL)) {
-			queue_foreach(&fdeventloop_priv->callbacks[i], fdhandle_priv, next) {
-				next = fdhandle_priv->next[FDEVENTS_HANDLE_QUEUE_ID]; /* The handle might get removed and the next pointer overwritten otherwise */
+	while (fdeventloop_priv->backend_ops->scan_for_events_next_locked(fdeventloop_priv->backend_data, &fd)) {
+		if (!asyncio_hashtable_lookup(&fdeventloop_priv->fd_map, fd, &index)) {
+			ASYNCIO_ERROR("Did not have fd in fdeventloop hashtable. Should never happen.\n");
+			break;
+		}
 
-				if (fdeventloop_priv->scratch_fds[i].revents & (fdhandle_priv->events | POLLERR | POLLHUP | POLLNVAL)) {
-					/* The callback queues are owned by the fdevents_loop, this is the only
-					 * thread that is allowed to remove handles from queues. It should not
-					 * be done during an fdevents_release_handle */
-					fdhandle_priv->revents = fdeventloop_priv->scratch_fds[i].revents;
+		queue_foreach(&fdeventloop_priv->callbacks[index], fdhandle_priv, next) {
+			next = fdhandle_priv->next[FDEVENTS_HANDLE_QUEUE_ID]; /* The handle might get removed and the next pointer overwritten otherwise */
 
-					if (fdhandle_priv->base.eventloop->dispatch_handle_to_threadpool_locked(&fdhandle_priv->base) != 0)
-						ASYNCIO_ERROR("Failed to dispatch events handle to threadpool, leaving in database.\n");
-				}
+			/* This will also set the revinfo upon successful match */
+			if (fdeventloop_priv->backend_ops->match_evinfo_locked(fdeventloop_priv->backend_data, fd, fdhandle_priv->evinfo, fdhandle_priv->revinfo)) {
+				/* The callback queues are owned by the fdevents_loop, this is the only
+				 * thread that is allowed to remove handles from queues. It should not
+				 * be done during an fdevents_release_handle */
+
+				/* Note that the dispatch_handle_to_threadpool_locked calls our fdevents_remove_handle_locked which
+				 * will remove handle from the callback queue upon successful dispatch to threadpool. */
+				if (fdhandle_priv->base.eventloop->dispatch_handle_to_threadpool_locked(&fdhandle_priv->base) != 0)
+					ASYNCIO_ERROR("Failed to dispatch events handle to threadpool, leaving in database.\n");
 			}
 		}
 	}
@@ -412,33 +295,33 @@ static void fdevents_continue_eventloop_thread_locked(void *instance)
 	struct asyncio_fdevents_loop_priv *fdeventloop_priv;
 
 	fdeventloop_priv = instance;
-
-	/* The masked fds must be removed from the scratch fds array because poll
-	 * will return on exceptions even when events is 0. */
-	copy_fdevents_scratch_locked(fdeventloop_priv);
+	fdeventloop_priv->backend_ops->continue_eventloop_thread_locked(fdeventloop_priv->backend_data);
 }
 
 
 static void fdevents_cleanup_eventloop_thread(void *instance)
 {
-	(void)instance;
-	/* Nothing to do */
+	struct asyncio_fdevents_loop_priv *fdeventloop_priv;
+
+	fdeventloop_priv = instance;
+	fdeventloop_priv->backend_ops->cleanup_eventloop_thread(fdeventloop_priv->backend_data);
 }
 
 /* Public */
-static int fdevents_eventloop_listen(struct asyncio_fdevents_loop *fdeventloop, const struct asyncio_fdevents_info *info, struct asyncio_fdevents_handle **handlep)
+static int fdevents_eventloop_listen(struct asyncio_fdevents_loop *fdeventloop, int fd, const void *evinfo, asyncio_fdevents_callback cb, void *arg, uint32_t threadpool_flags, struct asyncio_fdevents_handle **handlep)
 {
 	struct asyncio_fdevents_handle_priv *handle_priv;
 	int oldstate;
 
 	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
 
-	if (info->cb == NULL) {
+	if (cb == NULL) {
 		ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 		return -1;
 	}
 
-	if (set_nonblocking(info->fd) != 0) {
+	/* XXX We don't need no nonblocking! (for user fds, they can set them if they want) */
+	if (set_nonblocking(fd) != 0) {
 		ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 		return -1;
 	}
@@ -450,7 +333,7 @@ static int fdevents_eventloop_listen(struct asyncio_fdevents_loop *fdeventloop, 
 		return -1;
 	}
 
-	if (fdeventloop->priv->base.handle_init(&fdeventloop->priv->base, &handle_priv->base, info->flags) != 0) {
+	if (fdeventloop->priv->base.handle_init(&fdeventloop->priv->base, &handle_priv->base, threadpool_flags) != 0) {
 		ASYNCIO_ERROR("Failed to init events handle.\n");
 		asyncio_safe_free(handle_priv);
 		ASYNCIO_RESTORE_CANCELSTATE(oldstate);
@@ -465,14 +348,21 @@ static int fdevents_eventloop_listen(struct asyncio_fdevents_loop *fdeventloop, 
 	handle_priv->pub.acquire = fdevents_handle_acquire;
 	handle_priv->pub.release = fdevents_handle_release;
 
-	handle_priv->fd = info->fd;
-	handle_priv->events = to_poll_events(info->events);
-	handle_priv->revents = 0;
-	handle_priv->callback_fn = info->cb;
-	handle_priv->callback_arg = info->arg;
+	if (fdeventloop->priv->backend_ops->init_evinfo_revinfo(evinfo, &handle_priv->evinfo, &handle_priv->revinfo) != 0) {
+		ASYNCIO_ERROR("Failed to init backend evinfo and revinfo for handle.\n");
+		fdeventloop->priv->base.handle_cleanup_before_dispatch(&handle_priv->base);
+		asyncio_safe_free(handle_priv);
+		ASYNCIO_RESTORE_CANCELSTATE(oldstate);
+		return -1;
+	}
+
+	handle_priv->fd = fd;
+	handle_priv->callback_fn = cb;
+	handle_priv->callback_arg = arg;
 
 	if (fdeventloop->priv->base.dispatch_handle_to_eventloop(&fdeventloop->priv->base, &handle_priv->base) != 0) {
 		ASYNCIO_ERROR("Failed to dispatch handle to loop.\n");
+		fdeventloop->priv->backend_ops->cleanup_evinfo_revinfo(handle_priv->evinfo, handle_priv->revinfo);
 		fdeventloop->priv->base.handle_cleanup_before_dispatch(&handle_priv->base);
 		asyncio_safe_free(handle_priv);
 		ASYNCIO_RESTORE_CANCELSTATE(oldstate);
@@ -511,76 +401,76 @@ static int init_fdeventloop_private_data(const struct asyncio_fdevents_options *
 	int pipefds[2];
 	int rc;
 
-	if (options->max_nfds > NFDST_MAX - 1) {
-		ASYNCIO_ERROR("Value for fdevents max_nfds options too large.\n");
+	if (options->backend_type >= ASYNCIO_FDEVENTS_MAX_BACKEND_TYPES) {
+		ASYNCIO_ERROR("Invalid fdevents backend type.\n");
 		rc = -1;
 		goto return_;
 	}
 
-	/* No need to insert wake pipefd[0] in hashtable, we always know it's at index 0 */
-	if (asyncio_hashtable_init(&fdeventloop_priv->fd_map, options->max_nfds + 1) != 0) {
-		ASYNCIO_ERROR("Failed to initialize fdevents_loop hashtable.\n");
+	if (fdevents_backend_ops_list[options->backend_type] == NULL) {
+		ASYNCIO_ERROR("Invalid fdevents backend type.\n");
 		rc = -1;
 		goto return_;
 	}
 
-	fdeventloop_priv->fds = asyncio_safe_malloc(options->max_nfds + 1, sizeof *(fdeventloop_priv->fds));
-
-	if (fdeventloop_priv->fds == NULL) {
-		ASYNCIO_ERROR("Failed to malloc fdeventloop fds.\n");
+	/* Since we are adding one descriptor ourselves, should check for overflow */
+	if (options->max_nfds > SIZET_MAX - 1) {
+		ASYNCIO_ERROR("The max_nfds option for fdevents is too large.\n");
 		rc = -1;
-		goto return_fd_map;
+		goto return_;
 	}
 
-	fdeventloop_priv->callbacks = asyncio_safe_malloc(options->max_nfds + 1, sizeof *(fdeventloop_priv->callbacks));
-
-	if (fdeventloop_priv->callbacks == NULL) {
-		ASYNCIO_ERROR("Failed to malloc fdeventloop callbacks.\n");
-		rc = -1;
-		goto return_fds;
-	}
-
-	fdeventloop_priv->fdevents_refcounts = asyncio_safe_malloc(options->max_nfds + 1, sizeof *(fdeventloop_priv->fdevents_refcounts));
-
-	if (fdeventloop_priv->fdevents_refcounts == NULL) {
-		ASYNCIO_ERROR("Failed to malloc fdeventloop fdevents_refcounts.\n");
-		rc = -1;
-		goto return_callbacks;
-	}
+	fdeventloop_priv->backend_ops = fdevents_backend_ops_list[options->backend_type];
 
 	if (pipe(pipefds) != 0) {
 		ASYNCIO_SYSERROR("pipe");
 		rc = -1;
-		goto return_fdevents_refcounts;
+		goto return_;
 	}
 
 	if (set_nonblocking(pipefds[0]) != 0 || set_nonblocking(pipefds[1]) != 0) {
+		ASYNCIO_ERROR("Failed to set pipefds nonblocking.\n");
 		rc = -1;
 		goto return_pipefds;
 	}
 
-	fdeventloop_priv->scratch_fds = asyncio_safe_malloc(options->max_nfds + 1, sizeof *(fdeventloop_priv->scratch_fds));
-
-	if (fdeventloop_priv->scratch_fds == NULL) {
-		ASYNCIO_ERROR("Failed to malloc fdeventloop scratch fds.\n");
+	/* The user nfds and also one for the clearwakefd. */
+	if (fdeventloop_priv->backend_ops->init_backend_data(&fdeventloop_priv->backend_data, options->max_nfds + 1, pipefds[0]) != 0) {
+		ASYNCIO_ERROR("Failed to init fdevents backend data.\n");
 		rc = -1;
 		goto return_pipefds;
 	}
 
-	/* These are unused for the wake event */
-	queue_init(&fdeventloop_priv->callbacks[0], FDEVENTS_HANDLE_QUEUE_ID);
-	init_fdevents_refcount_locked(&fdeventloop_priv->fdevents_refcounts[0]);
+	/* The wakefd does not have any callbacks */
+	fdeventloop_priv->callbacks = asyncio_safe_malloc(options->max_nfds, sizeof *(fdeventloop_priv->callbacks));
+
+	if (fdeventloop_priv->callbacks == NULL) {
+		ASYNCIO_ERROR("Failed to malloc fdeventloop callbacks.\n");
+		rc = -1;
+		goto return_backend_data;
+	}
+
+	/* No need to insert wake pipefd[0] in hashtable. */
+	if (asyncio_hashtable_init(&fdeventloop_priv->fd_map, options->max_nfds) != 0) {
+		ASYNCIO_ERROR("Failed to init fdeventloop_priv fd_map.\n");
+		rc = -1;
+		goto return_callbacks;
+	}
+
+	/* Points to next available slot. Note that the wakefd does not take a callback queue slot. */
+	fdeventloop_priv->last = 0;
 
 	/* Add wake event for poll interruption when a change occured in pollfds */
-	fdeventloop_priv->fds[0].fd = pipefds[0];
-	fdeventloop_priv->fds[0].events = POLLIN;
-	fdeventloop_priv->nfds = 1;
-	fdeventloop_priv->max_nfds = (nfds_t)options->max_nfds + 1;
-	fdeventloop_priv->changed = 0;
 	fdeventloop_priv->wakefd = pipefds[1];
 	fdeventloop_priv->clearwakefd = pipefds[0];
 
 	return 0;
+
+return_callbacks:
+	asyncio_safe_free(fdeventloop_priv->callbacks);
+
+return_backend_data:
+	fdeventloop_priv->backend_ops->cleanup_backend_data(fdeventloop_priv->backend_data);
 
 return_pipefds:
 	if (close(pipefds[0]) != 0)
@@ -588,18 +478,6 @@ return_pipefds:
 
 	if (close(pipefds[1]) != 0)
 		ASYNCIO_SYSERROR("close");
-
-return_fdevents_refcounts:
-	asyncio_safe_free(fdeventloop_priv->fdevents_refcounts);
-
-return_callbacks:
-	asyncio_safe_free(fdeventloop_priv->callbacks);
-
-return_fds:
-	asyncio_safe_free(fdeventloop_priv->fds);
-
-return_fd_map:
-	asyncio_hashtable_destroy(&fdeventloop_priv->fd_map);
 
 return_:
 	return rc;
@@ -636,10 +514,8 @@ static void fdevents_cleanup_eventloop(void *instance)
 
 	fdeventloop_priv = instance;
 
-	asyncio_safe_free(fdeventloop_priv->scratch_fds);
-	asyncio_safe_free(fdeventloop_priv->fdevents_refcounts);
+	fdeventloop_priv->backend_ops->cleanup_backend_data(fdeventloop_priv->backend_data);
 	asyncio_safe_free(fdeventloop_priv->callbacks);
-	asyncio_safe_free(fdeventloop_priv->fds);
 
 	if (close(fdeventloop_priv->wakefd) != 0)
 		ASYNCIO_SYSERROR("close");
@@ -656,6 +532,9 @@ int asyncio_fdevents_init()
 {
 	int oldstate;
 	int rc;
+
+	fdevents_backend_ops_list[ASYNCIO_FDEVENTS_BACKEND_POLL] = &asyncio_fdevents_poll_backend_ops;
+	fdevents_backend_ops_list[ASYNCIO_FDEVENTS_BACKEND_SELECT] = &asyncio_fdevents_select_backend_ops;
 
 	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
 	rc = asyncio_events_backend_init(&fdevents_backend);
@@ -712,10 +591,12 @@ int asyncio_fdevents_eventloop(const struct asyncio_fdevents_options *options, s
 		ASYNCIO_ERROR("Failed to initialize fdeventloop private data.\n");
 		fdeventloop_priv->base.release(&fdeventloop_priv->base);
 		asyncio_safe_free(fdeventloop_priv);
+		ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 		return -1;
 	}
 
 	*eventloop = &fdeventloop_priv->pub;
+	ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 	return 0;
 }
 

@@ -4,9 +4,8 @@
 #include <stddef.h>
 
 struct hashtable_entry {
-	size_t klen;
-	const void *key;
-	const void *value;
+	int key;
+	size_t value;
 
 	struct hashtable_entry *bucket_next;
 	struct hashtable_entry *memory_next;
@@ -23,10 +22,10 @@ struct hashtable {
 };
 
 int asyncio_hashtable_init(struct hashtable *table, size_t maxentries);
-int asyncio_hashtable_insert(struct hashtable *table, size_t klen, const void *key, const void *value);
-int asyncio_hashtable_modify(struct hashtable *table, size_t klen, const void *key, const void *value);
-int asyncio_hashtable_lookup(struct hashtable *table, size_t klen, const void *key, const void **valuep);
-void asyncio_hashtable_delete(struct hashtable *table, size_t klen, const void *key);
+int asyncio_hashtable_insert(struct hashtable *table, int key, size_t value);
+int asyncio_hashtable_modify(struct hashtable *table, int key, size_t value);
+int asyncio_hashtable_lookup(struct hashtable *table, int key, size_t *valuep);
+void asyncio_hashtable_delete(struct hashtable *table, int key);
 void asyncio_hashtable_destroy(struct hashtable *table);
 
 #endif
