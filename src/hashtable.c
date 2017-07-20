@@ -110,7 +110,7 @@ int asyncio_hashtable_insert(struct hashtable *table, int key, size_t value)
 	return 0;
 }
 
-int asyncio_hashtable_modify(struct hashtable *table, int key, size_t value)
+int asyncio_hashtable_modify(const struct hashtable *table, int key, size_t value)
 {
 	struct hashtable_entry *entry;
 	size_t bucket;
@@ -130,7 +130,7 @@ int asyncio_hashtable_modify(struct hashtable *table, int key, size_t value)
 	return -1;
 }
 
-int asyncio_hashtable_lookup(struct hashtable *table, int key, size_t *valuep)
+int asyncio_hashtable_lookup(const struct hashtable *table, int key, size_t *valuep)
 {
 	struct hashtable_entry *entry;
 	size_t bucket;

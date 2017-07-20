@@ -23,8 +23,8 @@ struct hashtable {
 
 int asyncio_hashtable_init(struct hashtable *table, size_t maxentries);
 int asyncio_hashtable_insert(struct hashtable *table, int key, size_t value);
-int asyncio_hashtable_modify(struct hashtable *table, int key, size_t value);
-int asyncio_hashtable_lookup(struct hashtable *table, int key, size_t *valuep);
+int asyncio_hashtable_modify(const struct hashtable *table, int key, size_t value);
+int asyncio_hashtable_lookup(const struct hashtable *table, int key, size_t *valuep);
 void asyncio_hashtable_delete(struct hashtable *table, int key);
 void asyncio_hashtable_destroy(struct hashtable *table);
 

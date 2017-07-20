@@ -6,15 +6,15 @@
 #include "hashtable.h"
 #include "constants.h"
 #include "compile_time_assert.h"
-
-COMPILE_TIME_ASSERT(NFDST_MAX <= SIZET_MAX);
+#include "safe_malloc.h"
+#include "logging.h"
 
 /* STRUCT DEFINITIONS */
 struct poll_info {
 	nfds_t max_nfds;
 	nfds_t nfds;
 	struct pollfd *fds;
-	struct hashtable *fd_map;
+	struct hashtable fd_map;
 
 	/* scratch space */
 	struct pollfd *scratch_fds;
@@ -105,7 +105,7 @@ static int fdevents_poll_init_evinfo_revinfo(const void *evinfo, void **evinfop,
 	pollevinfo->events = the_evinfo->events;
 
 	*evinfop = pollevinfo;
-	*revinfo = pollrevinfo;
+	*revinfop = pollrevinfo;
 	return 0;
 }
 
@@ -320,6 +320,8 @@ static void fdevents_poll_cleanup_eventloop_thread(void *backend_data)
 static int fdevents_poll_init_backend_data(void **backend_data, size_t max_nfds, int clearwakefd)
 {
 	struct poll_info *pollinfo;
+	int rc;
+	COMPILE_TIME_ASSERT(NFDST_MAX <= SIZET_MAX);
 
 	if (max_nfds > NFDST_MAX) {
 		ASYNCIO_ERROR("Value for fdevents max_nfds options too large for poll backend.\n");
