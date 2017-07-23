@@ -9,11 +9,11 @@ else
 LDFLAGS = -shared
 TARGET = libasyncio.so
 CFLAGS += -D_GNU_SOURCE				# Make pthread library calls available on Linux
-EXAMPLES_CFLAGS = -Wl,-rpath=$(shell pwd)	# Tell linker where to look for libasyncio.so when linking examples
+USER_CFLAGS = -Wl,-rpath=$(shell pwd)		# Tell linker where to look for libasyncio.so when linking examples
 LIBS = -lpthread -lrt
 endif
 
-export EXAMPLES_CFLAGS	# Make available for sub-makes
+export USER_CFLAGS	# Make available for sub-makes
 export LIBS
 export UNAME
 

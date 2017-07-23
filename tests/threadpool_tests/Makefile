@@ -1,7 +1,7 @@
 IDIR = ../include
 ROOTDIR = ../../
 CC = gcc
-CFLAGS = -Wall -Wextra -Werror -Wmissing-prototypes -pedantic -std=c89
+CFLAGS = -Wall -Wextra -Werror -Wmissing-prototypes -pedantic -std=c89 $(USER_CFLAGS)
 
 ifneq ($(UNAME), Darwin)
 	CFLAGS += -D_POSIX_SOURCE -D_XOPEN_SOURCE=500
