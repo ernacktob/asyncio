@@ -3,6 +3,10 @@ ROOTDIR = ../../
 CC = gcc
 CFLAGS = -Wall -Wextra -Werror -Wmissing-prototypes -pedantic -std=c89
 
+ifneq ($(UNAME), Darwin)
+	CFLAGS += -D_POSIX_SOURCE -D_XOPEN_SOURCE=500
+endif
+
 LIBDIR = $(ROOTDIR)
 
 .PHONY: all clean

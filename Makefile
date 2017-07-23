@@ -15,6 +15,7 @@ endif
 
 export EXAMPLES_CFLAGS	# Make available for sub-makes
 export LIBS
+export UNAME
 
 IDIR = include
 SRCDIR = src
