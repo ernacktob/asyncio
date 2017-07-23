@@ -5,6 +5,7 @@
 #include <stdarg.h>
 
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -100,7 +101,12 @@ static void on_read(const struct asyncio_fdevents_loop *eventloop, int fd, const
 	printf_locked("Accepted new client!\n");
 
 	send(client_sock, "HELLO WORLD\n", strlen("HELLO WORLD\n"), 0);
+
+	/* Apparently, on OS X, the returned sockets from accept will automatically be set to nonblocking.
+	 * We want an easy way to just block until user types something, so force fcntl to blocking. */
+	fcntl(client_sock, F_SETFL, fcntl(client_sock, F_GETFL) & (~O_NONBLOCK));
 	recv(client_sock, &byte, 1, 0);
+
 	close(client_sock);
 
 	*continued = 1;

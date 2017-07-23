@@ -149,6 +149,10 @@ static void events_handle_cleanup_before_dispatch(struct events_handle *handle)
 static void execute_events_callback(void *arg)
 {
 	struct events_handle *handle;
+	int oldstate;
+
+	/* Disable cancellations if they were set. They will get set again in backend callback. */
+	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
 
 	handle = arg;
 	handle->continued = 0;
@@ -200,15 +204,7 @@ static int events_dispatch_handle_to_threadpool_locked(struct events_handle *han
 	struct asyncio_threadpool_dispatch_info info;
 	struct asyncio_threadpool_handle *threadpool_handle;
 
-	info.flags = ASYNCIO_THREADPOOL_FLAG_NONE;
-
-	if (handle->threadpool_flags & ASYNCIO_THREADPOOL_FLAG_CONTRACTOR) {
-		/* Do not use CANCELLATIONS here, because we don't want
-		 * execute_events_callback to be cancellable. It will set the user
-		 * desired cancellation state/type there. */
-		info.flags |= ASYNCIO_THREADPOOL_FLAG_CONTRACTOR;
-	}
-
+	info.flags = handle->threadpool_flags;
 	info.dispatch_info.fn = execute_events_callback;
 	info.dispatch_info.arg = handle;
 	info.completed_info.cb = events_threadpool_completed;
