@@ -72,7 +72,7 @@ static int pull_reaper_task(struct asyncio_threadpool_handle **handlep, int *sto
 static int dispatch_contractor(struct asyncio_threadpool_handle *handle);
 static int dispatch_worker(struct asyncio_threadpool_handle *handle);
 
-static int init_threadpool_handle(struct asyncio_threadpool_handle *handle, struct asyncio_threadpool_dispatch_info *task);
+static int init_threadpool_handle(struct asyncio_threadpool_handle *handle, const struct asyncio_threadpool_dispatch_info *task);
 static void cleanup_threadpool_handle(struct asyncio_threadpool_handle *handle);
 
 static void stop_manager_thread(void);
@@ -483,7 +483,11 @@ static void *reaper_thread(void *arg)
 	/* Release all handles in the workers task queue */
 	while (!queue_empty(&workers_task_queue)) {
 		queue_pop(&workers_task_queue, &handle);
-		/* Don't call any callbacks, it is as if it never happened (see threadpool_cancel). */
+
+		/* Call cancelled callback */
+		if (handle->info.cancelled_info.cb != NULL)
+			handle->info.cancelled_info.cb(handle->info.cancelled_info.arg);
+
 		notify_handle_finished(handle);
 	}
 
@@ -605,7 +609,7 @@ static int pull_reaper_task(struct asyncio_threadpool_handle **handlep, int *sto
 	return 0;
 }
 
-static int init_threadpool_handle(struct asyncio_threadpool_handle *handle, struct asyncio_threadpool_dispatch_info *task)
+static int init_threadpool_handle(struct asyncio_threadpool_handle *handle, const struct asyncio_threadpool_dispatch_info *task)
 {
 	ASYNCIO_DEBUG_ENTER(2 ARG("%p", handle) ARG("%p", task));
 	handle->info = *task;
@@ -786,7 +790,7 @@ return_cancelstate:
 	return rc;
 }
 
-int asyncio_threadpool_dispatch(struct asyncio_threadpool_dispatch_info *task, struct asyncio_threadpool_handle **handlep)
+int asyncio_threadpool_dispatch(const struct asyncio_threadpool_dispatch_info *task, struct asyncio_threadpool_handle **handlep)
 {
 	struct asyncio_threadpool_handle *handle;
 	int oldstate;
@@ -936,8 +940,9 @@ int asyncio_threadpool_cancel(struct asyncio_threadpool_handle *handle)
 	ASYNCIO_MUTEX_UNLOCK(&threadpool_mtx);
 
 	if (removed_from_queue) {
-		/* No reason to call cancelled callback, it is as if the threadpool dispatch
-		 * had never happened, since we took it out of the queue before worker could see it. */
+		/* Call cancelled callback. */
+		if (handle->info.cancelled_info.cb != NULL)
+			handle->info.cancelled_info.cb(handle->info.cancelled_info.arg);
 
 		/* There's no pthread_join that can return, it's just taken out of queue. */
 		notify_handle_finished(handle);

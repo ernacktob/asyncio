@@ -10,12 +10,18 @@
 #include <netinet/in.h>
 #include <sys/resource.h>
 
-#include "fdevents.h"
+#include <pthread.h>
+
+#include "asyncio_fdevents.h"
+#include "asyncio_threadpool.h"
 
 #define CONNECTIONS_PER_SECOND		4000
 #define MAX_CONCURRENT_CONNECTIONS	4000
 #define ACCEPT_LATENCY_MS		2
 #define BACKLOG_SIZE			((((CONNECTIONS_PER_SECOND) * (ACCEPT_LATENCY_MS)) / 1000) * 2)
+
+static unsigned int count = 0;
+static pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
 
 static void printf_locked(const char *fmt, ...)
 {
@@ -76,11 +82,12 @@ static int create_accept_sock(void)
 	return accept_sock;
 }
 
-static void on_readable(int fd, uint16_t revents, void *arg, int *continued)
+static void on_readable(const struct asyncio_fdevents_loop *eventloop, int fd, const void *revinfo, void *arg, int *continued)
 {
 	char byte;
 	ssize_t rb;
-	(void)revents;
+	(void)eventloop;
+	(void)revinfo;
 	(void)arg;
 	(void)continued;
 
@@ -103,12 +110,12 @@ static void on_readable(int fd, uint16_t revents, void *arg, int *continued)
 	close(fd);
 }
 
-static void on_writable(int fd, uint16_t revents, void *arg, int *continued)
+static void on_writable(const struct asyncio_fdevents_loop *eventloop, int fd, const void *revinfo, void *arg, int *continued)
 {
-	struct fdevent_info evinfo;
-	fdevent_handle_t handle;
+	struct asyncio_fdevents_poll_evinfo evinfo;
+	struct asyncio_fdevents_handle *handle;
 	ssize_t sb;
-	(void)revents;
+	(void)revinfo;
 	(void)arg;
 	(void)continued;
 
@@ -120,34 +127,25 @@ static void on_writable(int fd, uint16_t revents, void *arg, int *continued)
 		return;
 	}
 
-	evinfo.fd = fd;
-	evinfo.events = FDEVENT_EVENT_READ;
-	evinfo.flags = FDEVENT_FLAG_NONE;
-	evinfo.cb = on_readable;
-	evinfo.arg = NULL;
+	evinfo.events = POLLIN;
 
-	if (fdevent_register(&evinfo, &handle) != 0) {
+	if (eventloop->listen(eventloop, fd, &evinfo, on_readable, NULL, ASYNCIO_THREADPOOL_FLAG_NONE, &handle) != 0) {
 		printf_locked("Failed to register on_readable.\n");
 		close(fd);
 		return;
 	}
 
-	fdevent_release_handle(handle);
+	handle->release(handle);
 }
 
-#include <pthread.h>
-
-static unsigned int count = 0;
-static pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
-
-static void on_connect(int fd, uint16_t revents, void *arg, int *continued)
+static void on_connect(const struct asyncio_fdevents_loop *eventloop, int fd, const void *revinfo, void *arg, int *continued)
 {
-	struct fdevent_info evinfo;
-	fdevent_handle_t handle;
+	struct asyncio_fdevents_poll_evinfo evinfo;
+	struct asyncio_fdevents_handle *handle;
 	int client_sock;
 	struct sockaddr dummy_addr;
 	socklen_t dummy_len;
-	(void)revents;
+	(void)revinfo;
 	(void)arg;
 
 	dummy_len = sizeof dummy_addr;
@@ -155,18 +153,14 @@ static void on_connect(int fd, uint16_t revents, void *arg, int *continued)
 	client_sock = accept(fd, &dummy_addr, &dummy_len);
 
 	while (client_sock > 0) {
-		evinfo.fd = client_sock;
-		evinfo.events = FDEVENT_EVENT_WRITE;
-		evinfo.flags = FDEVENT_FLAG_NONE;
-		evinfo.cb = on_writable;
-		evinfo.arg = NULL;
+		evinfo.events = POLLOUT;
 
-		if (fdevent_register(&evinfo, &handle) != 0) {
+		if (eventloop->listen(eventloop, client_sock, &evinfo, on_writable, NULL, ASYNCIO_THREADPOOL_FLAG_NONE, &handle) != 0) {
 			printf_locked("Failed to register on_writable.\n");
 			close(client_sock);
 		}
 
-		fdevent_release_handle(handle);
+		handle->release(handle);
 
 		pthread_mutex_lock(&mtx);
 		++count;
@@ -176,18 +170,21 @@ static void on_connect(int fd, uint16_t revents, void *arg, int *continued)
 	}
 
 	if (errno != EWOULDBLOCK) {
+		perror("accept");
 		printf_locked("error during accept.\n");
 		return;
 	}
 
-	fdevent_continue(continued);
+	*continued = 1;
 }
 
 int main()
 {
 	struct rlimit rl;
-	struct fdevent_info evinfo;
-	fdevent_handle_t handle;
+	struct asyncio_fdevents_options options;
+	struct asyncio_fdevents_loop *eventloop;
+	struct asyncio_fdevents_poll_evinfo evinfo;
+	struct asyncio_fdevents_handle *handle;
 	int sockfd;
 
 	if (getrlimit(RLIMIT_NOFILE, &rl) != 0) {
@@ -209,21 +206,28 @@ int main()
 		exit(EXIT_FAILURE);
 	}
 
-	if (fdevent_init() != 0) {
-		printf_locked("Failed to initialize fdevent module.\n");
+	if (asyncio_fdevents_init() != 0) {
+		printf_locked("Failed to initialize fdevents module.\n");
 		close(sockfd);
 		exit(EXIT_FAILURE);
 	}
 
-	evinfo.fd = sockfd;
-	evinfo.events = FDEVENT_EVENT_READ;
-	evinfo.flags = FDEVENT_FLAG_CANCELLABLE;
-	evinfo.cb = on_connect;
-	evinfo.arg = NULL;
+	options.max_nfds = 10000;
+	options.backend_type = ASYNCIO_FDEVENTS_BACKEND_POLL;
 
-	if (fdevent_register(&evinfo, &handle) != 0) {
-		printf_locked("Failed to wait event.\n");
-		fdevent_cleanup();
+	if (asyncio_fdevents_eventloop(&options, &eventloop) != 0) {
+		printf_locked("Failed to create fdevents eventloop.\n");
+		asyncio_fdevents_cleanup();
+		close(sockfd);
+		exit(EXIT_FAILURE);
+	}
+
+	evinfo.events = POLLIN;
+
+	if (eventloop->listen(eventloop, sockfd, &evinfo, on_connect, NULL, ASYNCIO_THREADPOOL_FLAG_CANCELLABLE, &handle) != 0) {
+		printf_locked("Failed to listen on event.\n");
+		eventloop->release(eventloop);
+		asyncio_fdevents_cleanup();
 		close(sockfd);
 		exit(EXIT_FAILURE);
 	}
@@ -232,16 +236,17 @@ int main()
 	usleep(10000000);
 
 	printf_locked("Cancelling fdevent...\n");
-	if (fdevent_cancel(handle) != 0)
+	if (handle->cancel(handle) != 0)
 		printf_locked("Failed to cancel.\n");
 
 	printf_locked("Waiting for fdevent to complete...\n");
-	if (fdevent_join(handle) != 0)
+	if (handle->wait(handle) != 0)
 		printf_locked("Failed to join.\n");
 
 	printf_locked("count = %u\n", count);
-	fdevent_release_handle(handle);
-	fdevent_cleanup();
+	handle->release(handle);
+	eventloop->release(eventloop);
+	asyncio_fdevents_cleanup();
 	close(sockfd);
 	return 0;
 }

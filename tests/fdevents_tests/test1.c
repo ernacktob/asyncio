@@ -9,7 +9,14 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
-#include "fdevents.h"
+#include "asyncio_fdevents.h"
+#include "asyncio_threadpool.h"
+
+/* PROTOTYPES */
+static void printf_locked(const char *fmt, ...);
+static int create_accept_sock(void);
+static void on_read(const struct asyncio_fdevents_loop *eventloop, int fd, const void *revinfo, void *arg, int *continued);
+/* END PROTOTYPES */
 
 static void printf_locked(const char *fmt, ...)
 {
@@ -70,15 +77,18 @@ static int create_accept_sock(void)
 	return accept_sock;
 }
 
-static void on_read(int fd, uint16_t revents, void *arg, int *continued)
+static void on_read(const struct asyncio_fdevents_loop *eventloop, int fd, const void *revinfo, void *arg, int *continued)
 {
+	const struct asyncio_fdevents_poll_evinfo *pollrevinfo;
 	int client_sock;
 	struct sockaddr dummy_addr;
 	socklen_t dummy_len;
 	char byte;
+	(void)eventloop;
 
+	pollrevinfo = revinfo;
 	dummy_len = sizeof dummy_addr;
-	printf_locked("on_read: revents = %hd, arg = %p\n", revents, arg);
+	printf_locked("on_read: revents = %hd, arg = %p\n", pollrevinfo->events, arg);
 
 	client_sock = accept(fd, &dummy_addr, &dummy_len);
 
@@ -93,13 +103,17 @@ static void on_read(int fd, uint16_t revents, void *arg, int *continued)
 	recv(client_sock, &byte, 1, 0);
 	close(client_sock);
 
-	fdevent_continue(continued);
+	*continued = 1;
 }
 
 int main()
 {
-	struct fdevent_info evinfo;
-	fdevent_handle_t handle;
+	struct asyncio_fdevents_options options;
+	struct asyncio_fdevents_loop *eventloop;
+
+	struct asyncio_fdevents_poll_evinfo evinfo;
+	struct asyncio_fdevents_handle *handle;
+
 	int sockfd;
 
 	sockfd = create_accept_sock();
@@ -109,21 +123,28 @@ int main()
 		exit(EXIT_FAILURE);
 	}
 
-	if (fdevent_init() != 0) {
-		printf_locked("Failed to initialize fdevent module.\n");
+	if (asyncio_fdevents_init() != 0) {
+		printf_locked("Failed to initialize fdevents module.\n");
 		close(sockfd);
 		exit(EXIT_FAILURE);
 	}
 
-	evinfo.fd = sockfd;
-	evinfo.events = FDEVENT_EVENT_READ;
-	evinfo.flags = FDEVENT_FLAG_CANCELLABLE;
-	evinfo.cb = on_read;
-	evinfo.arg = NULL;
+	options.max_nfds = 10000;
+	options.backend_type = ASYNCIO_FDEVENTS_BACKEND_POLL;
 
-	if (fdevent_register(&evinfo, &handle) != 0) {
-		printf_locked("Failed to wait event.\n");
-		fdevent_cleanup();
+	if (asyncio_fdevents_eventloop(&options, &eventloop) != 0) {
+		printf_locked("Failed to create eventloop.\n");
+		asyncio_fdevents_cleanup();
+		close(sockfd);
+		exit(EXIT_FAILURE);
+	}
+
+	evinfo.events = POLLIN;
+
+	if (eventloop->listen(eventloop, sockfd, &evinfo, on_read, NULL, ASYNCIO_THREADPOOL_FLAG_CANCELLABLE, &handle) != 0) {
+		printf_locked("Failed to listen on eventloop.\n");
+		eventloop->release(eventloop);
+		asyncio_fdevents_cleanup();
 		close(sockfd);
 		exit(EXIT_FAILURE);
 	}
@@ -132,15 +153,19 @@ int main()
 	usleep(10000000);
 
 	printf_locked("Cancelling fdevent...\n");
-	if (fdevent_cancel(handle) != 0)
+	if (handle->cancel(handle) != 0)
 		printf_locked("Failed to cancel.\n");
 
 	printf_locked("Waiting for fdevent to complete...\n");
-	if (fdevent_join(handle) != 0)
+	if (handle->wait(handle) != 0)
 		printf_locked("Failed to join.\n");
 
-	fdevent_release_handle(handle);
-	fdevent_cleanup();
+	printf_locked("Releasing handle.\n");
+	handle->release(handle);
+	printf_locked("release eventloop.\n");
+	eventloop->release(eventloop);
+	printf_locked("cleanup fdevents\n");
+	asyncio_fdevents_cleanup();
 
 	close(sockfd);
 	return 0;

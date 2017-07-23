@@ -4,6 +4,10 @@
 #include <pthread.h>
 #include <errno.h>
 
+/* PROTOTYPES */
+void *do_stuff(void *arg);
+/* END PROTOTYPES */
+
 void *do_stuff(void *arg)
 {
 	int i;

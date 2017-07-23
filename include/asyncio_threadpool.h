@@ -31,7 +31,7 @@ struct asyncio_threadpool_dispatch_info {
 };
 
 int asyncio_threadpool_init(void);
-int asyncio_threadpool_dispatch(struct asyncio_threadpool_dispatch_info *task, struct asyncio_threadpool_handle **handlep);
+int asyncio_threadpool_dispatch(const struct asyncio_threadpool_dispatch_info *task, struct asyncio_threadpool_handle **handlep);
 int asyncio_threadpool_cancel(struct asyncio_threadpool_handle *handle);
 int asyncio_threadpool_join(struct asyncio_threadpool_handle *handle);
 int asyncio_threadpool_acquire_handle(struct asyncio_threadpool_handle *handle);

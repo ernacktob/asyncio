@@ -3,7 +3,13 @@
 
 #include <unistd.h>
 
-#include "threadpool.h"
+#include "asyncio_threadpool.h"
+
+/* PROTOTYPES */
+void printf_locked(const char *fmt, ...);
+void do_stuff(void *arg);
+void do_things(void *arg);
+/* END PROTOTYPES */
 
 void printf_locked(const char *fmt, ...)
 {
@@ -45,49 +51,49 @@ void do_things(void *arg)
 
 int main()
 {
-	struct threadpool_dispatch_info info;
-	threadpool_handle_t handle, handle2;
+	struct asyncio_threadpool_dispatch_info info;
+	struct asyncio_threadpool_handle *handle, *handle2;
 
-	if (threadpool_init() != 0) {
+	if (asyncio_threadpool_init() != 0) {
 		printf_locked("Failed to initialize threadpool module.\n");
 		return -1;
 	}
 
-	info.flags = THREADPOOL_FLAG_CANCELLABLE;
+	info.flags = ASYNCIO_THREADPOOL_FLAG_CANCELLABLE;
 	info.dispatch_info.fn = do_stuff;
 	info.dispatch_info.arg = NULL;
 	info.completed_info.cb = NULL;
 	info.cancelled_info.cb = NULL;
 
-	if (threadpool_dispatch(&info, &handle2) != 0) {
+	if (asyncio_threadpool_dispatch(&info, &handle2) != 0) {
 		printf_locked("Failed to dispatch.\n");
-		threadpool_cleanup();
+		asyncio_threadpool_cleanup();
 		return -1;
 	}
 
 	info.dispatch_info.fn = do_things;
 
-	if (threadpool_dispatch(&info, &handle) != 0) {
+	if (asyncio_threadpool_dispatch(&info, &handle) != 0) {
 		printf_locked("Failed to dispatch.\n");
-		threadpool_release_handle(handle2);
-		threadpool_cleanup();
+		asyncio_threadpool_release_handle(handle2);
+		asyncio_threadpool_cleanup();
 		return -1;
 	}
 
 	printf_locked("joining\n");
-	if (threadpool_join(handle) != 0)
+	if (asyncio_threadpool_join(handle) != 0)
 		printf_locked("Failed to join.\n");
 
 	printf_locked("joined handle\n");
-	if (threadpool_cancel(handle2) != 0)
+	if (asyncio_threadpool_cancel(handle2) != 0)
 		printf_locked("Failed to cancel.\n");
 
-	if (threadpool_join(handle2) != 0)
+	if (asyncio_threadpool_join(handle2) != 0)
 		printf_locked("Failed to join2\n");
 
 	printf_locked("joined handle2\n");
-	threadpool_release_handle(handle2);
-	threadpool_release_handle(handle);
-	threadpool_cleanup();
+	asyncio_threadpool_release_handle(handle2);
+	asyncio_threadpool_release_handle(handle);
+	asyncio_threadpool_cleanup();
 	return 0;
 }

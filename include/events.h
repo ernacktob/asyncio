@@ -85,21 +85,6 @@ struct events_loop {
 	void (*backend_cleanup_eventloop)(void *instance);
 };
 
-struct events_backend {
-	ASYNCIO_MUTEX_T mtx;
-	int initialized;
-	unsigned long refcount;
-
-	decl_queue(struct events_loop, all_eventloops);
-
-	struct events_backend *prev[NUMBER_EVENTS_BACKEND_QUEUES];
-	struct events_backend *next[NUMBER_EVENTS_BACKEND_QUEUES];
-};
-
-#define EVENTS_BACKEND_INITIALIZER {ASYNCIO_MUTEX_INITIALIZER, 0, 0, QUEUE_INITIALIZER, {NULL}, {NULL}}
-
-int asyncio_events_backend_init(struct events_backend *backend);
-int asyncio_events_backend_eventloop(struct events_backend *backend, struct events_loop *eventloop);
-void asyncio_events_backend_cleanup(struct events_backend *backend);
+int asyncio_events_eventloop(struct events_loop *eventloop);
 
 #endif

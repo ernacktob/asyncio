@@ -14,7 +14,9 @@
 struct asyncio_fdevents_handle_priv;
 struct asyncio_fdevents_loop_priv;
 
-typedef void (*asyncio_fdevents_callback)(int fd, const void *revinfo, void *arg, int *continued);
+struct asyncio_fdevents_loop;
+
+typedef void (*asyncio_fdevents_callback)(const struct asyncio_fdevents_loop *eventloop, int fd, const void *revinfo, void *arg, int *continued);
 
 struct asyncio_fdevents_options {
 	size_t max_nfds;
@@ -34,7 +36,7 @@ struct asyncio_fdevents_loop {
 	struct asyncio_fdevents_loop_priv *priv;
 
 	int (*acquire)(const struct asyncio_fdevents_loop *self);
-	int (*listen)(struct asyncio_fdevents_loop *self, int fd, const void *evinfo, asyncio_fdevents_callback cb, void *arg, uint32_t threadpool_flags, struct asyncio_fdevents_handle **handlep);
+	int (*listen)(const struct asyncio_fdevents_loop *self, int fd, const void *evinfo, asyncio_fdevents_callback cb, void *arg, uint32_t threadpool_flags, struct asyncio_fdevents_handle **handlep);
 	void (*release)(const struct asyncio_fdevents_loop *self);
 };
 

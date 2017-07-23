@@ -39,7 +39,7 @@ static void fdevents_scan_for_events_locked(void *instance);
 static void fdevents_continue_eventloop_thread_locked(void *instance);
 static void fdevents_cleanup_eventloop_thread(void *instance);
 
-static int fdevents_eventloop_listen(struct asyncio_fdevents_loop *fdeventloop, int fd, const void *evinfo, asyncio_fdevents_callback cb, void *arg, uint32_t threadpool_flags, struct asyncio_fdevents_handle **handlep); /* PUBLIC */
+static int fdevents_eventloop_listen(const struct asyncio_fdevents_loop *fdeventloop, int fd, const void *evinfo, asyncio_fdevents_callback cb, void *arg, uint32_t threadpool_flags, struct asyncio_fdevents_handle **handlep); /* PUBLIC */
 static int fdevents_eventloop_acquire(const struct asyncio_fdevents_loop *fdeventloop); /* PUBLIC */
 static void fdevents_eventloop_release(const struct asyncio_fdevents_loop *fdeventloop); /* PUBLIC */
 
@@ -50,7 +50,6 @@ static void fdevents_cleanup_eventloop(void *instance);
 /* END PROTOTYPES */
 
 /* GLOBALS */
-static struct events_backend fdevents_backend = EVENTS_BACKEND_INITIALIZER;
 static struct fdevents_backend_ops *fdevents_backend_ops_list[ASYNCIO_FDEVENTS_MAX_BACKEND_TYPES] = {NULL};
 /* END GLOBALS */
 
@@ -210,10 +209,14 @@ static void fdevents_handle_release(const struct asyncio_fdevents_handle *handle
 static void fdevents_handle_callback(void *handle_instance, uint32_t threadpool_flags, int *continued)
 {
 	struct asyncio_fdevents_handle_priv *fdhandle_priv;
+	struct asyncio_fdevents_loop_priv *fdeventloop_priv;
+	struct asyncio_fdevents_loop *fdeventloop;
 	int oldtype;
 	int oldstate;
 
 	fdhandle_priv = handle_instance;
+	fdeventloop_priv = fdhandle_priv->base.eventloop->instance;
+	fdeventloop = &fdeventloop_priv->pub;
 
 	/* Set user-defined cancellation settings */
 	if (threadpool_flags & ASYNCIO_THREADPOOL_FLAG_ASYNCCANCEL)
@@ -226,7 +229,7 @@ static void fdevents_handle_callback(void *handle_instance, uint32_t threadpool_
 	else
 		ASYNCIO_SET_CANCELSTATE(ASYNCIO_CANCEL_DISABLE, &oldstate);
 
-	fdhandle_priv->callback_fn(fdhandle_priv->fd, fdhandle_priv->revinfo, fdhandle_priv->callback_arg, continued);
+	fdhandle_priv->callback_fn(fdeventloop, fdhandle_priv->fd, fdhandle_priv->revinfo, fdhandle_priv->callback_arg, continued);
 
 	ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 	ASYNCIO_RESTORE_CANCELTYPE(oldtype);
@@ -308,7 +311,7 @@ static void fdevents_cleanup_eventloop_thread(void *instance)
 }
 
 /* Public */
-static int fdevents_eventloop_listen(struct asyncio_fdevents_loop *fdeventloop, int fd, const void *evinfo, asyncio_fdevents_callback cb, void *arg, uint32_t threadpool_flags, struct asyncio_fdevents_handle **handlep)
+static int fdevents_eventloop_listen(const struct asyncio_fdevents_loop *fdeventloop, int fd, const void *evinfo, asyncio_fdevents_callback cb, void *arg, uint32_t threadpool_flags, struct asyncio_fdevents_handle **handlep)
 {
 	struct asyncio_fdevents_handle_priv *handle_priv;
 	int oldstate;
@@ -329,6 +332,7 @@ static int fdevents_eventloop_listen(struct asyncio_fdevents_loop *fdeventloop, 
 	handle_priv = asyncio_safe_malloc(1, sizeof *handle_priv);
 
 	if (handle_priv == NULL) {
+		ASYNCIO_ERROR("Failed to malloc handle_priv.\n");
 		ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 		return -1;
 	}
@@ -531,16 +535,15 @@ static void fdevents_cleanup_eventloop(void *instance)
 int asyncio_fdevents_init()
 {
 	int oldstate;
-	int rc;
+
+	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
 
 	fdevents_backend_ops_list[ASYNCIO_FDEVENTS_BACKEND_POLL] = &asyncio_fdevents_poll_backend_ops;
 	fdevents_backend_ops_list[ASYNCIO_FDEVENTS_BACKEND_SELECT] = &asyncio_fdevents_select_backend_ops;
 
-	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
-	rc = asyncio_events_backend_init(&fdevents_backend);
 	ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 
-	return rc;
+	return 0;
 }
 
 /* Public */
@@ -554,13 +557,6 @@ int asyncio_fdevents_eventloop(const struct asyncio_fdevents_options *options, s
 
 	if (fdeventloop_priv == NULL) {
 		ASYNCIO_ERROR("Failed to malloc fdeventloop_priv.\n");
-		ASYNCIO_RESTORE_CANCELSTATE(oldstate);
-		return -1;
-	}
-
-	if (asyncio_events_backend_eventloop(&fdevents_backend, &fdeventloop_priv->base) != 0) {
-		ASYNCIO_ERROR("Failed to create backend base events_loop.\n");
-		asyncio_safe_free(fdeventloop_priv);
 		ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 		return -1;
 	}
@@ -583,14 +579,22 @@ int asyncio_fdevents_eventloop(const struct asyncio_fdevents_options *options, s
 	fdeventloop_priv->base.backend_clearwake_eventloop_locked = fdevents_clearwake_eventloop_locked;
 	fdeventloop_priv->base.backend_cleanup_eventloop = fdevents_cleanup_eventloop;
 
+	fdeventloop_priv->pub.priv = fdeventloop_priv;
 	fdeventloop_priv->pub.acquire = fdevents_eventloop_acquire;
 	fdeventloop_priv->pub.release = fdevents_eventloop_release;
 	fdeventloop_priv->pub.listen = fdevents_eventloop_listen;
 
 	if (init_fdeventloop_private_data(options, fdeventloop_priv) != 0) {
 		ASYNCIO_ERROR("Failed to initialize fdeventloop private data.\n");
-		fdeventloop_priv->base.release(&fdeventloop_priv->base);
 		asyncio_safe_free(fdeventloop_priv);
+		ASYNCIO_RESTORE_CANCELSTATE(oldstate);
+		return -1;
+	}
+
+	/* This needs to happen after the previous initializations because it uses them. */
+	if (asyncio_events_eventloop(&fdeventloop_priv->base) != 0) {
+		ASYNCIO_ERROR("Failed to create backend base events_loop.\n");
+		fdevents_cleanup_eventloop(fdeventloop_priv); /* This also frees it. */
 		ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 		return -1;
 	}
@@ -603,9 +607,6 @@ int asyncio_fdevents_eventloop(const struct asyncio_fdevents_options *options, s
 /* Public */
 void asyncio_fdevents_cleanup()
 {
-	int oldstate;
-
-	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
-	asyncio_events_backend_cleanup(&fdevents_backend);
-	ASYNCIO_RESTORE_CANCELSTATE(oldstate);
+	/* Nothing to do here */
+	return;
 }

@@ -24,7 +24,7 @@ static void events_threadpool_completed(void *arg);
 static int events_dispatch_handle_to_threadpool_locked(struct events_handle *handle);
 
 static void eventloop_thread(void *arg);
-static void stop_eventloop_thread(struct events_loop *eventloop);
+static void stop_eventloop_thread_locked(struct events_loop *eventloop);
 
 static int events_handle_wait(struct events_handle *handle, int old_cancelstate);
 static int events_handle_cancel(struct events_handle *handle);
@@ -47,7 +47,7 @@ static void set_changed_events_locked(struct events_loop *eventloop)
 {
 	int wake;
 
-	if (eventloop->changed)
+	if (!(eventloop->changed))
 		wake = 1;
 	else
 		wake = 0;
@@ -103,8 +103,8 @@ static int events_dispatch_handle_to_eventloop(struct events_loop *eventloop, st
 	}
 
 	handle->in_eventloop_database = 1;
-	set_changed_events_locked(eventloop);
 
+	set_changed_events_locked(eventloop);
 	queue_push(&eventloop->all_handles, handle);
 
 	ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
@@ -176,7 +176,7 @@ static void events_threadpool_completed(void *arg)
 	asyncio_threadpool_release_handle(handle->threadpool_handle);
 	handle->has_threadpool_handle = 0;
 
-	if (handle->continued) {
+	if ((!(handle->eventloop->stopped)) && handle->continued) {
 		handle->continued = 0;
 
 		if (handle->eventloop->backend_insert_events_handle_locked(handle->eventloop->instance, handle->instance) != 0) {
@@ -226,9 +226,9 @@ static int events_dispatch_handle_to_threadpool_locked(struct events_handle *han
 	 * - the client thread that got the handle
 	 * - the events_loop worker */
 	handle->eventloop->backend_remove_events_handle_locked(handle->eventloop->instance, handle->instance);
+	handle->in_eventloop_database = 0;
 	handle->threadpool_handle = threadpool_handle;
 	handle->has_threadpool_handle = 1;
-	handle->in_eventloop_database = 0;
 
 	return 0;
 }
@@ -282,22 +282,10 @@ static void eventloop_thread(void *arg)
 	eventloop->backend_cleanup_eventloop_thread(eventloop->instance);
 }
 
-static void stop_eventloop_thread(struct events_loop *eventloop)
+static void stop_eventloop_thread_locked(struct events_loop *eventloop)
 {
-	if (ASYNCIO_MUTEX_LOCK(&eventloop->mtx)) {
-		ASYNCIO_ERROR("Failed to lock eventloop mtx.\n");
-		return;
-	}
-
 	eventloop->stopped = 1;
 	eventloop->backend_wakeup_eventloop_locked(eventloop->instance);
-
-	ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
-
-	if (asyncio_threadpool_join(eventloop->threadpool_handle) != 0)
-		ASYNCIO_ERROR("Failed to join on eventloop threadpool handle.\n");
-
-	asyncio_threadpool_release_handle(eventloop->threadpool_handle);
 }
 
 static int events_handle_wait(struct events_handle *handle, int old_cancelstate)
@@ -346,23 +334,19 @@ static int events_handle_cancel(struct events_handle *handle)
 	int success = 1;
 	int notify = 0;
 
+	/* NOTE: THIS SHALL NOT BE CALLED BEFORE events_dispatch_handle_to_eventloop! */
+
 	if (ASYNCIO_MUTEX_LOCK(&handle->eventloop->mtx) != 0) {
 		ASYNCIO_ERROR("Failed to lock handle's eventloop mtx.\n");
 		return -1;
 	}
 
-	if (handle->in_eventloop_database) {
-		/* Should never happen, but just putting this here to detect potential bugs... */
-		if (handle->has_threadpool_handle)
-			ASYNCIO_ERROR("This should never happen. The events handle is in eventloop database and has threadpool handle.\n");
+	if (!(handle->threadpool_flags & ASYNCIO_THREADPOOL_FLAG_CANCELLABLE)) {
+		ASYNCIO_ERROR("Tried to cancel handle without the ASYNCIO_THREADPOOL_FLAG_CANCELLABLE flag.\n");
+		return -1;
+	}
 
-		/* Means it has not yet been dispatched to threadpool, so eventloop won't have access to handle anymore.
-		 * Note that if it was in a thread, it will have access due to the cancelled callback. */
-		handle->eventloop->backend_remove_events_handle_locked(handle->eventloop->instance, handle->instance);
-		set_changed_events_locked(handle->eventloop);
-		notify = 1;
-		success = 1;
-	} else {
+	if (handle->has_threadpool_handle) {
 		notify = 0;
 		success = 1;
 
@@ -370,6 +354,18 @@ static int events_handle_cancel(struct events_handle *handle)
 			ASYNCIO_ERROR("Failed to cancel threadpool handle.\n");
 			success = 0;
 		}
+	} else if (handle->in_eventloop_database) {
+		/* Means it has not yet been dispatched to threadpool, so eventloop won't have access to handle anymore.
+		 * Note that if it was in a thread, it will have access due to the cancelled callback. */
+		handle->eventloop->backend_remove_events_handle_locked(handle->eventloop->instance, handle->instance);
+		handle->in_eventloop_database = 0;
+		set_changed_events_locked(handle->eventloop);
+		notify = 1;
+		success = 1;
+	} else {
+		notify = 0;
+		success = 1;
+		/* Means the handle has finished, so do nothing. */
 	}
 
 	ASYNCIO_MUTEX_UNLOCK(&handle->eventloop->mtx);
@@ -471,52 +467,54 @@ static void events_eventloop_release(struct events_loop *eventloop)
 		return;
 	}
 
-	stop_eventloop_thread(eventloop);
-
-	while (!queue_empty(&eventloop->all_handles)) {
-		queue_pop(&eventloop->all_handles, &handle);
-
-		if (handle->has_threadpool_handle) {
-			if (asyncio_threadpool_join(handle->threadpool_handle) != 0)
-				ASYNCIO_ERROR("Failed to join events handle's threadpool handle.\n");
-		}
-
-		notify_events_handle_finished(handle);
-	}
-
-	asyncio_threadpool_cleanup();
-	eventloop->backend_cleanup_eventloop(eventloop->instance);
+	stop_eventloop_thread_locked(eventloop);
 
 	ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
+
+	if (asyncio_threadpool_join(eventloop->threadpool_handle) != 0)
+		ASYNCIO_ERROR("Failed to join on eventloop threadpool handle.\n");
+
+	asyncio_threadpool_release_handle(eventloop->threadpool_handle);
+
+	if (ASYNCIO_MUTEX_LOCK(&eventloop->mtx) != 0) {
+		ASYNCIO_ERROR("Failed to lock eventloop mtx. This shouldn't happen, now we can't release ressources.\n");
+		return;
+	}
+
+	while (!queue_empty(&eventloop->all_handles)) {
+		handle = queue_first(&eventloop->all_handles);
+
+		if (handle->in_eventloop_database) {
+			handle->eventloop->backend_remove_events_handle_locked(handle->eventloop->instance, handle->instance);
+			handle->in_eventloop_database = 0;
+		}
+
+		if (handle->has_threadpool_handle) {
+			ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
+
+			if (asyncio_threadpool_join(handle->threadpool_handle) != 0)
+				ASYNCIO_ERROR("Failed to join event handle's threadpool handle.\n");
+		} else {
+			/* Only notify if not in threadpool, because otherwise it gets done in completed callback. */
+			ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
+			notify_events_handle_finished(handle);
+		}
+
+		if (ASYNCIO_MUTEX_LOCK(&eventloop->mtx) != 0) {
+			ASYNCIO_ERROR("Failed to lock eventloop mtx. This shouldn't happen, now we can't release ressources.\n");
+			break;
+		}
+	}
+
+	ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
+	asyncio_threadpool_cleanup();
+
+	/* Destroy only once all handles have finished, but before backend cleanup. */
 	ASYNCIO_MUTEX_DESTROY(&eventloop->mtx);
+	eventloop->backend_cleanup_eventloop(eventloop->instance);
 }
 
-int asyncio_events_backend_init(struct events_backend *backend)
-{
-	if (ASYNCIO_MUTEX_LOCK(&backend->mtx) != 0) {
-		ASYNCIO_ERROR("Failed to lock backend mtx.\n");
-		return -1;
-	}
-
-	if (!(backend->initialized)) {
-		queue_init(&backend->all_eventloops, EVENTS_EVENTLOOP_QUEUE_ID);
-		backend->refcount = 0;
-		backend->initialized = 1;
-	}
-
-	if (backend->refcount == ULONG_MAX) {
-		ASYNCIO_ERROR("Backend refcount reached maximum.\n");
-		ASYNCIO_MUTEX_UNLOCK(&backend->mtx);
-		return -1;
-	}
-
-	++(backend->refcount);
-
-	ASYNCIO_MUTEX_UNLOCK(&backend->mtx);
-	return 0;
-}
-
-int asyncio_events_backend_eventloop(struct events_backend *backend, struct events_loop *eventloop)
+int asyncio_events_eventloop(struct events_loop *eventloop)
 {
 	struct asyncio_threadpool_dispatch_info eventloop_task;
 
@@ -529,7 +527,6 @@ int asyncio_events_backend_eventloop(struct events_backend *backend, struct even
 	 * even though it has access to pointer, because when eventloop is released, there
 	 * will be a stop signal on the thread and release will wait until it has finished. */
 	eventloop->refcount = 1;
-	eventloop->backend = backend;
 	eventloop->acquire = events_eventloop_acquire;
 	eventloop->release = events_eventloop_release;
 	eventloop->handle_init = events_handle_init;
@@ -563,41 +560,4 @@ int asyncio_events_backend_eventloop(struct events_backend *backend, struct even
 	}
 
 	return 0;
-}
-
-void asyncio_events_backend_cleanup(struct events_backend *backend)
-{
-	struct events_loop *eventloop;
-
-	if (ASYNCIO_MUTEX_LOCK(&backend->mtx) != 0) {
-		ASYNCIO_ERROR("Failed to lock backend mtx.\n");
-		return;
-	}
-
-	if (!(backend->initialized)) {
-		ASYNCIO_MUTEX_UNLOCK(&backend->mtx);
-		return;
-	}
-
-	if (backend->refcount == 0) {
-		ASYNCIO_ERROR("Backend refcount already 0, should never happen.\n");
-		ASYNCIO_MUTEX_UNLOCK(&backend->mtx);
-		return;
-	}
-
-	--(backend->refcount);
-
-	if (backend->refcount > 0) {
-		ASYNCIO_MUTEX_UNLOCK(&backend->mtx);
-		return;
-	}
-
-	backend->initialized = 0;
-
-	while (!queue_empty(&backend->all_eventloops)) {
-		queue_pop(&backend->all_eventloops, &eventloop);
-		eventloop->release(eventloop);
-	}
-
-	ASYNCIO_MUTEX_UNLOCK(&backend->mtx);
 }

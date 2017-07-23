@@ -40,7 +40,7 @@ $(ODIR)/%.o: $(SRCDIR)/%.c $(HEADERS)
 $(TARGET): objdir public_headers $(OBJECTS)
 	$(LD) $(LDFLAGS) $(OBJECTS) $(LIBS) -o $@
 
-tests:
+tests: $(TARGET)
 	$(MAKE) -C tests
 
 examples: $(TARGET)

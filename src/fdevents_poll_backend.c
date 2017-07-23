@@ -223,7 +223,7 @@ static void fdevents_poll_remove_fd_locked(void *backend_data, int fd)
 		return;
 	}
 
-	if (asyncio_hashtable_lookup(&pollinfo->fd_map, fd, &index) != 0) {
+	if (!asyncio_hashtable_lookup(&pollinfo->fd_map, fd, &index)) {
 		ASYNCIO_ERROR("Failed to lookup fd for pollinfo remove.\n");
 		return;
 	}
