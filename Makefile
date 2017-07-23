@@ -8,7 +8,7 @@ LIBS = -lpthread
 else
 LDFLAGS = -shared
 TARGET = libasyncio.so
-CFLAGS += -D_GNU_SOURCE
+CFLAGS += -D_GNU_SOURCE -D_BSD_SOURCE		# Make certain library calls available on Linux
 EXAMPLES_CFLAGS = -Wl,-rpath=$(shell pwd)	# Tell linker where to look for libasyncio.so when linking examples
 LIBS = -lpthread -lrt
 endif
