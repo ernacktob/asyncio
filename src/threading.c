@@ -45,10 +45,14 @@ int ASYNCIO_THREAD_CANCEL(ASYNCIO_THREAD_T thread)
 	ASYNCIO_DEBUG_ENTER(1 ARG("%016llx", thread));
 	ASYNCIO_DEBUG_CALL(2 FUNC(pthread_cancel) ARG("%016llx", thread));
 	if ((rc = pthread_cancel(thread)) != 0) {
-		errno = rc;
-		ASYNCIO_SYSERROR("pthread_cancel");
-		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
-		return -1;
+		if (rc != ESRCH) {
+			/* Some implementations return ESRCH when a thread has terminated by has not yet been released
+			   by a pthread_join or pthread_detach. This is not really a problem so ignore it. */
+			errno = rc;
+			ASYNCIO_SYSERROR("pthread_cancel");
+			ASYNCIO_DEBUG_RETURN(RET("%d", -1));
+			return -1;
+		}
 	}
 
 	ASYNCIO_DEBUG_RETURN(RET("%d", 0));
