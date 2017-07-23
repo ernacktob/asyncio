@@ -1,7 +1,10 @@
 #include <stddef.h>
-#include <string.h>	/* for bcopy, which FD_COPY uses as macro */
 #include <limits.h>
 #include <sys/select.h>
+
+#ifdef FD_COPY
+#include <string.h>	/* for bcopy, which FD_COPY uses as macro */
+#endif
 
 #include "asyncio_fdevents_select.h"
 #include "fdevents_priv.h"
@@ -293,9 +296,18 @@ static int fdevents_select_initialize_eventloop_thread(void *backend_data)
 
 	selectinfo = backend_data;
 
+	/* This is completely retarded, but apparently FD_COPY is not supported
+	 * on all platforms that supposrt select(). And also doing struct equality
+	 * assignment is apparently not quite standard either... Oh my goodness. */
+#ifdef FD_COPY
 	FD_COPY(&selectinfo->readfds, &selectinfo->scratch_readfds);
 	FD_COPY(&selectinfo->writefds, &selectinfo->scratch_writefds);
 	FD_COPY(&selectinfo->errorfds, &selectinfo->scratch_errorfds);
+#else
+	selectinfo->scratch_readfds = selectinfo->readfds;
+	selectinfo->scratch_writefds = selectinfo->writefds;
+	selectinfo->scratch_errorfds = selectinfo->errorfds;
+#endif
 
 	/* nfds argument to select() is max fd plus 1. */
 	selectinfo->scratch_nfds = selectinfo->max_fd + 1;
@@ -330,9 +342,15 @@ static void fdevents_select_process_changed_events_locked(void *backend_data)
 
 	selectinfo = backend_data;
 
+#ifdef FD_COPY
 	FD_COPY(&selectinfo->readfds, &selectinfo->scratch_readfds);
 	FD_COPY(&selectinfo->writefds, &selectinfo->scratch_writefds);
 	FD_COPY(&selectinfo->errorfds, &selectinfo->scratch_errorfds);
+#else
+	selectinfo->scratch_readfds = selectinfo->readfds;
+	selectinfo->scratch_writefds = selectinfo->writefds;
+	selectinfo->scratch_errorfds = selectinfo->errorfds;
+#endif
 
 	/* nfds argument to select() is max fd plus 1. */
 	selectinfo->scratch_nfds = selectinfo->max_fd + 1;
@@ -376,9 +394,15 @@ static void fdevents_select_continue_eventloop_thread_locked(void *backend_data)
 
 	selectinfo = backend_data;
 
+#ifdef FD_COPY
 	FD_COPY(&selectinfo->readfds, &selectinfo->scratch_readfds);
 	FD_COPY(&selectinfo->writefds, &selectinfo->scratch_writefds);
 	FD_COPY(&selectinfo->errorfds, &selectinfo->scratch_errorfds);
+#else
+	selectinfo->scratch_readfds = selectinfo->readfds;
+	selectinfo->scratch_writefds = selectinfo->writefds;
+	selectinfo->scratch_errorfds = selectinfo->errorfds;
+#endif
 
 	/* nfds argument to select() is max fd plus 1. */
 	selectinfo->scratch_nfds = selectinfo->max_fd + 1;

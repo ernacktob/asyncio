@@ -1,3 +1,4 @@
+CFLAGS = -Wall -Wextra -Werror -Wmissing-prototypes -pedantic -std=c89 -fPIC -DMALLOC_IS_THREAD_SAFE
 UNAME = $(shell uname)
 
 ifeq ($(UNAME), Darwin)
@@ -7,6 +8,7 @@ LIBS = -lpthread
 else
 LDFLAGS = -shared
 TARGET = libasyncio.so
+CFLAGS += -D_GNU_SOURCE
 EXAMPLES_CFLAGS = -Wl,-rpath=$(shell pwd)	# Tell linker where to look for libasyncio.so when linking examples
 LIBS = -lpthread -lrt
 endif
@@ -18,7 +20,6 @@ IDIR = include
 SRCDIR = src
 ODIR = obj
 CC = gcc
-CFLAGS = -Wall -Wextra -Werror -Wmissing-prototypes -pedantic -std=c89 -fPIC -DMALLOC_IS_THREAD_SAFE
 LD = ld
 
 .PHONY: default all objdir public_headers tests examples clean
