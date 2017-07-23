@@ -1,7 +1,7 @@
 IDIR = ../include
 ROOTDIR = ../../
 CC = gcc
-CFLAGS = -Wall -Wextra -Werror -Wmissing-prototypes -pedantic -std=c89
+CFLAGS = -Wall -Wextra -Werror -Wmissing-prototypes -pedantic -std=c89 -D_POSIX_SOURCE
 
 LIBDIR = $(ROOTDIR)
 
