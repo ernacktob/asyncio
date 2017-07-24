@@ -8,7 +8,8 @@
 #include <netinet/in.h>
 #include <sys/errno.h>
 
-#include "asyncio.h"
+#include "asyncio_fdevents.h"
+#include "asyncio_threadpool.h"
 
 #define LOCALHOST	"127.0.0.1"
 #define PORT		12345
@@ -27,12 +28,12 @@ struct ConnectionState {
 /* PROTOTYPES */
 static struct ConnectionState *ConnectionState_create(void);
 static void ConnectionState_destroy(struct ConnectionState *state);
-static void ConnectionState_readable(int sockfd, asyncio_fdevent_t revents, void *arg, asyncio_continue_t continued);
-static void ConnectionState_writable(int sockfd, asyncio_fdevent_t revents, void *arg, asyncio_continue_t continued);
-static void ConnectionState_connected(struct ConnectionState *state, int sockfd);
+static void ConnectionState_readable(const struct asyncio_fdevents_loop *eventloop, int sockfd, const void *revinfo, void *arg, int *continued);
+static void ConnectionState_writable(const struct asyncio_fdevents_loop *eventloop, int sockfd, const void *revinfo, void *arg, int *continued);
+static void ConnectionState_connected(const struct asyncio_fdevents_loop *eventloop, struct ConnectionState *state, int sockfd);
 
 static int create_accept_sock(void);
-static void accept_clients(int fd, asyncio_fdevent_t revents, void *arg, asyncio_continue_t continued);
+static void accept_clients(const struct asyncio_fdevents_loop *eventloop, int fd, const void *revinfo, void *arg, int *continued);
 /* END PROTOTYPES */
 
 static struct ConnectionState *ConnectionState_create(void)
@@ -56,17 +57,20 @@ static void ConnectionState_destroy(struct ConnectionState *state)
 	free(state);
 }
 
-static void ConnectionState_readable(int sockfd, asyncio_fdevent_t revents, void *arg, asyncio_continue_t continued)
+static void ConnectionState_readable(const struct asyncio_fdevents_loop *eventloop, int sockfd, const void *revinfo, void *arg, int *continued)
 {
 	struct ConnectionState *state;
+	const struct asyncio_fdevents_poll_evinfo *pollrevinfo;
+	struct asyncio_fdevents_poll_evinfo evinfo;
 	char *newline;
 	int sendit;
-	asyncio_handle_t handle;
+	struct asyncio_fdevents_handle *handle;
 	ssize_t rb;
 
-	state = (struct ConnectionState *)arg;
+	pollrevinfo = revinfo;
+	state = arg;
 
-	if (revents & ASYNCIO_FDEVENT_ERROR) {
+	if (pollrevinfo->events & (POLLERR | POLLHUP | POLLNVAL)) {
 		ConnectionState_destroy(state);
 		close(sockfd);
 		return;
@@ -95,28 +99,33 @@ static void ConnectionState_readable(int sockfd, asyncio_fdevent_t revents, void
 	}
 
 	if (sendit) {
-		if (asyncio_fdevent(sockfd, ASYNCIO_FDEVENT_WRITE, ConnectionState_writable, state, ASYNCIO_FLAG_NONE, &handle) != 0) {
+		evinfo.events = POLLOUT;
+
+		if (eventloop->listen(eventloop, sockfd, &evinfo, ConnectionState_writable, state, ASYNCIO_THREADPOOL_FLAG_NONE, &handle) != 0) {
 			fprintf(stderr, "Failed to register fdevent.\n");
 			ConnectionState_destroy(state);
 			close(sockfd);
 			return;
 		}
 
-		asyncio_release(handle);
+		handle->release(handle);
 	} else {
-		asyncio_continue(continued);
+		*continued = 1;
 	}
 }
 
-static void ConnectionState_writable(int sockfd, asyncio_fdevent_t revents, void *arg, asyncio_continue_t continued)
+static void ConnectionState_writable(const struct asyncio_fdevents_loop *eventloop, int sockfd, const void *revinfo, void *arg, int *continued)
 {
 	struct ConnectionState *state;
-	asyncio_handle_t handle;
+	const struct asyncio_fdevents_poll_evinfo *pollrevinfo;
+	struct asyncio_fdevents_poll_evinfo evinfo;
+	struct asyncio_fdevents_handle *handle;
 	ssize_t sb;
 
-	state = (struct ConnectionState *)arg;
+	pollrevinfo = revinfo;
+	state = arg;
 
-	if (revents & ASYNCIO_FDEVENT_ERROR) {
+	if (pollrevinfo->events & (POLLERR | POLLHUP | POLLNVAL)) {
 		ConnectionState_destroy(state);
 		close(sockfd);
 		return;
@@ -137,35 +146,40 @@ static void ConnectionState_writable(int sockfd, asyncio_fdevent_t revents, void
 		state->len = 0;
 		state->pos = 0;
 
-		if (asyncio_fdevent(sockfd, ASYNCIO_FDEVENT_READ, ConnectionState_readable, state, ASYNCIO_FLAG_NONE, &handle) != 0) {
+		evinfo.events = POLLIN;
+
+		if (eventloop->listen(eventloop, sockfd, &evinfo, ConnectionState_readable, state, ASYNCIO_THREADPOOL_FLAG_NONE, &handle) != 0) {
 			fprintf(stderr, "Failed to register fdevent.\n");
 			ConnectionState_destroy(state);
 			close(sockfd);
 			return;
 		}
 
-		asyncio_release(handle);
+		handle->release(handle);
 	} else {
-		asyncio_continue(continued);
+		*continued = 1;
 	}
 }
 
-static void ConnectionState_connected(struct ConnectionState *state, int sockfd)
+static void ConnectionState_connected(const struct asyncio_fdevents_loop *eventloop, struct ConnectionState *state, int sockfd)
 {
 	const char *greeting = "Welcome to the echo server.\nType a line of at most 1000 characters, and it will be echoed back.\n\n";
-	asyncio_handle_t handle;
+	struct asyncio_fdevents_poll_evinfo evinfo;
+	struct asyncio_fdevents_handle *handle;
 
 	strncpy(state->echostr, greeting, MAX_STRLEN);
 	state->echostr[MAX_STRLEN] = '\0';
 	state->pos = 0;
 	state->len = strlen(state->echostr);
 
-	if (asyncio_fdevent(sockfd, ASYNCIO_FDEVENT_WRITE, ConnectionState_writable, state, ASYNCIO_FLAG_NONE, &handle) != 0) {
+	evinfo.events = POLLOUT;
+
+	if (eventloop->listen(eventloop, sockfd, &evinfo, ConnectionState_writable, state, ASYNCIO_THREADPOOL_FLAG_NONE, &handle) != 0) {
 		fprintf(stderr, "Failed to register fdevent.\n");
 		return;
 	}
 
-	asyncio_release(handle);
+	handle->release(handle);
 }
 
 static int create_accept_sock(void)
@@ -214,13 +228,13 @@ static int create_accept_sock(void)
 	return accept_sock;
 }
 
-static void accept_clients(int fd, asyncio_fdevent_t revents, void *arg, asyncio_continue_t continued)
+static void accept_clients(const struct asyncio_fdevents_loop *eventloop, int fd, const void *revinfo, void *arg, int *continued)
 {
 	struct ConnectionState *state;
 	int client_sock;
 	struct sockaddr dummy_addr;
 	socklen_t dummy_len;
-	(void)revents;
+	(void)revinfo;
 	(void)arg;
 
 	dummy_len = sizeof dummy_addr;
@@ -233,7 +247,7 @@ static void accept_clients(int fd, asyncio_fdevent_t revents, void *arg, asyncio
 		if (state == NULL)
 			fprintf(stderr, "Failed to create ConnectionState\n");
 		else
-			ConnectionState_connected(state, client_sock);
+			ConnectionState_connected(eventloop, state, client_sock);
 
 		client_sock = accept(fd, &dummy_addr, &dummy_len);
 	}
@@ -243,36 +257,63 @@ static void accept_clients(int fd, asyncio_fdevent_t revents, void *arg, asyncio
 		return;
 	}
 
-	asyncio_continue(continued);
+	*continued = 1;
 }
 
 int main()
 {
-	asyncio_handle_t handle;
+	struct asyncio_fdevents_options options;
+	struct asyncio_fdevents_loop *eventloop;
+	struct asyncio_fdevents_poll_evinfo evinfo;
+	struct asyncio_fdevents_handle *handle;
 	int accept_sockfd;
+
+	if (asyncio_fdevents_init() != 0) {
+		fprintf(stderr, "Failed to init asyncio fdevents.\n");
+		return -1;
+	}
 
 	accept_sockfd = create_accept_sock();
 
 	if (accept_sockfd == -1) {
 		fprintf(stderr, "Failed to create accept sock.\n");
+		asyncio_fdevents_cleanup();
 		return -1;
 	}
 
-	if (asyncio_fdevent(accept_sockfd, ASYNCIO_FDEVENT_READ, accept_clients, NULL, ASYNCIO_FLAG_NONE, &handle) != 0) {
-		fprintf(stderr, "Failed to register fdevent.\n");
+	options.max_nfds = 10000;
+	options.backend_type = ASYNCIO_FDEVENTS_BACKEND_POLL;
+
+	if (asyncio_fdevents_eventloop(&options, &eventloop) != 0) {
+		fprintf(stderr, "Failed to create eventloop.\n");
 		close(accept_sockfd);
+		asyncio_fdevents_cleanup();
+		return -1;
+	}
+
+	evinfo.events = POLLIN;
+
+	if (eventloop->listen(eventloop, accept_sockfd, &evinfo, accept_clients, NULL, ASYNCIO_THREADPOOL_FLAG_NONE, &handle) != 0) {
+		fprintf(stderr, "Failed to listen for fdevent.\n");
+		eventloop->release(eventloop);
+		close(accept_sockfd);
+		asyncio_fdevents_cleanup();
 		return -1;
 	}
 
 	/* Should never return, server runs forever */
-	if (asyncio_join(handle) != 0) {
-		fprintf(stderr, "Failed to join handle.\n");
+	if (handle->wait(handle) != 0) {
+		fprintf(stderr, "Failed to wait handle.\n");
+		eventloop->release(eventloop);
 		close(accept_sockfd);
+		asyncio_fdevents_cleanup();
 		return -1;
 	}
 
-	asyncio_release(handle);
+	handle->release(handle);
+	eventloop->release(eventloop);
 	close(accept_sockfd);
+	asyncio_fdevents_cleanup();
 
 	return 0;
 }
