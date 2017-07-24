@@ -11,7 +11,7 @@ LIBDIR = $(ROOTDIR)
 
 .PHONY: all clean
 
-all: test1 test2
+all: test1 test2 test3
 
 %: %.c
 	$(CC) $(CFLAGS) $@.c -I$(IDIR) -L$(LIBDIR) $(LIBS) -o $@
@@ -19,3 +19,4 @@ all: test1 test2
 clean:
 	rm -f test1
 	rm -f test2
+	rm -f test3

@@ -121,7 +121,6 @@ static int fdevents_select_init_evinfo_revinfo(const void *evinfo, void **evinfo
 	*evinfop = select_evinfo;
 	*revinfop = select_revinfo;
 	return 0;
-
 }
 
 static void fdevents_select_cleanup_evinfo_revinfo(void *evinfo, void *revinfo)
