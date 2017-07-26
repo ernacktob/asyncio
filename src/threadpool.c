@@ -99,6 +99,7 @@ static ASYNCIO_THREAD_T reaper_thread_threadt;
 static ASYNCIO_COND_T reaper_cond = ASYNCIO_COND_INITIALIZER;
 static decl_queue(struct asyncio_threadpool_handle, reaper_immediate_task_queue); /* Handles that will terminate very soon */
 static decl_queue(struct asyncio_threadpool_handle, reaper_task_queue); /* All existing handles for ultimate cleanup */
+/* END GLOBALS */
 
 /* NOTE: Whenever there is a threadpool_release_handle in this module, handle must also be removed from the reaper_task_queue.
  * This doesn't apply to handles still in the workers_task_queue because they are not yet put in the reaper task queue.
@@ -109,7 +110,6 @@ static decl_queue(struct asyncio_threadpool_handle, reaper_task_queue); /* All e
  * queue are "unborn", they never had a thread so there is nothing to reap. Their lifecycle is ended by whoever took them
  * out of the queue (for example threadpool_cancel). */
 
-/* END GLOBALS */
 static void unlock_threadpool_mtx_cleanup(void *arg)
 {
 	/* Used as a wrapper to match the pthread_cleanup_push prototype */
@@ -168,7 +168,7 @@ static void notify_handle_thread_died(struct asyncio_threadpool_handle *handle)
 		 * while iterating over the reaper task queue.
 		 *
 		 * We're just settling for a delayed release of ressources in the
-		 * very ulikely event that the push function above returns an error,
+		 * very unlikely event that the push function above returns an error,
 		 * which is really not even supposed to happen anyway... */
 	}
 
@@ -203,7 +203,7 @@ static void contractor_cleanup(void *arg)
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", arg));
 
 	/* handle was acquired in contractor_thread */
-	handle = (struct asyncio_threadpool_handle *)arg;
+	handle = arg;
 
 	/* Decrement contractors count */
 	if (ASYNCIO_MUTEX_LOCK(&threadpool_mtx) != 0) {
@@ -237,7 +237,7 @@ static void *contractor_thread(void *arg)
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", arg));
 	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
 
-	handle = (struct asyncio_threadpool_handle *)arg;
+	handle = arg;
 	ASYNCIO_CLEANUP_PUSH(contractor_cleanup, handle);
 
 	if (handle->info.flags & ASYNCIO_THREADPOOL_FLAG_ASYNCCANCEL)
@@ -273,7 +273,7 @@ static void worker_handle_cleanup(void *arg)
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", arg));
 
 	/* handle was acquired in worker_thread */
-	handle = (struct asyncio_threadpool_handle *)arg;
+	handle = arg;
 
 	/* Do not release handle, it will be done by the reaper thread. */
 	notify_handle_thread_died(handle);
@@ -292,7 +292,7 @@ static void *worker_thread(void *arg)
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", arg));
 	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
 
-	worker_info = (struct worker_thread_info *)arg;
+	worker_info = arg;
 
 	for (;;) {
 		if (pull_worker_task(worker_info, &handle, &stopped) != 0) {

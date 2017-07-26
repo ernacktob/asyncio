@@ -296,7 +296,7 @@ static int fdevents_select_initialize_eventloop_thread(void *backend_data)
 	selectinfo = backend_data;
 
 	/* This is completely retarded, but apparently FD_COPY is not supported
-	 * on all platforms that supposrt select(). And also doing struct equality
+	 * on all platforms that support select(). And also doing struct equality
 	 * assignment is apparently not quite standard either... Oh my goodness. */
 #ifdef FD_COPY
 	FD_COPY(&selectinfo->readfds, &selectinfo->scratch_readfds);
