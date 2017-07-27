@@ -18,8 +18,6 @@
 #include "compile_time_assert.h"
 
 /* PROTOTYPES */
-static int set_nonblocking(int fd);
-
 static int fdevents_insert_handle_locked(void *eventloop_instance, void *handle_instance);
 static void fdevents_remove_handle_locked(void *eventloop_instance, void *handle_instance);
 
@@ -31,6 +29,7 @@ static int fdevents_handle_acquire(const struct asyncio_fdevents_handle *handle)
 static void fdevents_handle_release(const struct asyncio_fdevents_handle *handle); /* PUBLIC */
 
 static void fdevents_handle_callback(void *handle_instance, uint32_t threadpool_flags, int *continued);
+static void fdevents_handle_cancelled_callback(void *handle_instance);
 
 static int fdevents_initialize_eventloop_thread(void *instance);
 static int fdevents_wait_for_events(void *instance);
@@ -39,7 +38,7 @@ static void fdevents_scan_for_events_locked(void *instance);
 static void fdevents_continue_eventloop_thread_locked(void *instance);
 static void fdevents_cleanup_eventloop_thread(void *instance);
 
-static int fdevents_eventloop_listen(const struct asyncio_fdevents_loop *fdeventloop, int fd, const void *evinfo, asyncio_fdevents_callback cb, void *arg, uint32_t threadpool_flags, struct asyncio_fdevents_handle **handlep); /* PUBLIC */
+static int fdevents_eventloop_listen(const struct asyncio_fdevents_loop *fdeventloop, const struct asyncio_fdevents_listen_info *info, struct asyncio_fdevents_handle **handlep); /* PUBLIC */
 static int fdevents_eventloop_acquire(const struct asyncio_fdevents_loop *fdeventloop); /* PUBLIC */
 static void fdevents_eventloop_release(const struct asyncio_fdevents_loop *fdeventloop); /* PUBLIC */
 
@@ -53,20 +52,6 @@ static void fdevents_cleanup_eventloop(void *instance);
 static struct fdevents_backend_ops *fdevents_backend_ops_list[ASYNCIO_FDEVENTS_MAX_BACKEND_TYPES] = {NULL};
 /* END GLOBALS */
 
-static int set_nonblocking(int fd)
-{
-	int oldflags;
-
-	oldflags = fcntl(fd, F_GETFL);
-
-	if (fcntl(fd, F_SETFL, oldflags | O_NONBLOCK) == -1) {
-		ASYNCIO_SYSERROR("fcntl");
-		return -1;
-	}
-
-	return 0;
-}
-
 static int fdevents_insert_handle_locked(void *eventloop_instance, void *handle_instance)
 {
 	struct asyncio_fdevents_loop_priv *fdeventloop_priv;
@@ -77,24 +62,24 @@ static int fdevents_insert_handle_locked(void *eventloop_instance, void *handle_
 	fdhandle_priv = handle_instance;
 
 	/* The fd is already in the database, just add handle to queue and acquire evinfo */
-	if (asyncio_hashtable_lookup(&fdeventloop_priv->fd_map, fdhandle_priv->fd, &index)) {
-		if (fdeventloop_priv->backend_ops->acquire_evinfo_locked(fdeventloop_priv->backend_data, fdhandle_priv->fd, fdhandle_priv->evinfo)) {
+	if (asyncio_hashtable_lookup(&fdeventloop_priv->fd_map, fdhandle_priv->info.fd, &index)) {
+		if (fdeventloop_priv->backend_ops->acquire_evinfo_locked(fdeventloop_priv->backend_data, fdhandle_priv->info.fd, fdhandle_priv->evinfo)) {
 			/* ASYNCIO_ERROR("The fdevents backend cannot acquire the evinfo for this fd.\n"); */
 			return -1;
 		}
 
 		queue_push(&fdeventloop_priv->callbacks[index], fdhandle_priv);
 	} else {
-		if (fdeventloop_priv->backend_ops->insert_fd_locked(fdeventloop_priv->backend_data, fdhandle_priv->fd, fdhandle_priv->evinfo) != 0) {
+		if (fdeventloop_priv->backend_ops->insert_fd_locked(fdeventloop_priv->backend_data, fdhandle_priv->info.fd, fdhandle_priv->evinfo) != 0) {
 			ASYNCIO_ERROR("Failed to insert new fd in fdevents backend database.\n");
 			return -1;
 		}
 
 		index = fdeventloop_priv->last;
 
-		if (asyncio_hashtable_insert(&fdeventloop_priv->fd_map, fdhandle_priv->fd, index) != 0) {
+		if (asyncio_hashtable_insert(&fdeventloop_priv->fd_map, fdhandle_priv->info.fd, index) != 0) {
 			ASYNCIO_ERROR("Failed to insert fd in hashtable.\n");
-			fdeventloop_priv->backend_ops->remove_fd_locked(fdeventloop_priv->backend_data, fdhandle_priv->fd);
+			fdeventloop_priv->backend_ops->remove_fd_locked(fdeventloop_priv->backend_data, fdhandle_priv->info.fd);
 			return -1;
 		}
 
@@ -120,24 +105,24 @@ static void fdevents_remove_handle_locked(void *eventloop_instance, void *handle
 		return;
 	}
 
-	if (!asyncio_hashtable_lookup(&fdeventloop_priv->fd_map, fdhandle_priv->fd, &index)) {
+	if (!asyncio_hashtable_lookup(&fdeventloop_priv->fd_map, fdhandle_priv->info.fd, &index)) {
 		ASYNCIO_ERROR("Tried to remove handle not in the fdeventloop queue.\n");
 		return;
 	}
 
-	fdeventloop_priv->backend_ops->release_evinfo_locked(fdeventloop_priv->backend_data, fdhandle_priv->fd, fdhandle_priv->evinfo);
+	fdeventloop_priv->backend_ops->release_evinfo_locked(fdeventloop_priv->backend_data, fdhandle_priv->info.fd, fdhandle_priv->evinfo);
 	queue_remove(&fdeventloop_priv->callbacks[index], fdhandle_priv);
 
 	if (queue_empty(&fdeventloop_priv->callbacks[index])) {
-		asyncio_hashtable_delete(&fdeventloop_priv->fd_map, fdhandle_priv->fd);
-		fdeventloop_priv->backend_ops->remove_fd_locked(fdeventloop_priv->backend_data, fdhandle_priv->fd);
+		asyncio_hashtable_delete(&fdeventloop_priv->fd_map, fdhandle_priv->info.fd);
+		fdeventloop_priv->backend_ops->remove_fd_locked(fdeventloop_priv->backend_data, fdhandle_priv->info.fd);
 
 		last_valid_index = fdeventloop_priv->last - 1;
 
 		/* Swap the last callback queue into the released slot to keep all valid queues consecutive. */
 		if (index < last_valid_index) {
 			last_fdhandle = queue_first(&fdeventloop_priv->callbacks[last_valid_index]);
-			asyncio_hashtable_modify(&fdeventloop_priv->fd_map, last_fdhandle->fd, index);	/* This can't fail. */
+			asyncio_hashtable_modify(&fdeventloop_priv->fd_map, last_fdhandle->info.fd, index);	/* This can't fail. */
 			fdeventloop_priv->callbacks[index] = fdeventloop_priv->callbacks[last_valid_index];
 		}
 
@@ -152,6 +137,9 @@ static void fdevents_cleanup_events_handle(void *eventloop_instance, void *handl
 
 	fdeventloop_priv = eventloop_instance;
 	fdhandle_priv = handle_instance;
+
+	if (fdhandle_priv->info.release_cb != NULL)
+		fdhandle_priv->info.release_cb(fdhandle_priv->info.arg);
 
 	fdeventloop_priv->backend_ops->cleanup_evinfo_revinfo(fdhandle_priv->evinfo, fdhandle_priv->revinfo);
 	asyncio_safe_free(fdhandle_priv);
@@ -211,12 +199,18 @@ static void fdevents_handle_callback(void *handle_instance, uint32_t threadpool_
 	struct asyncio_fdevents_handle_priv *fdhandle_priv;
 	struct asyncio_fdevents_loop_priv *fdeventloop_priv;
 	struct asyncio_fdevents_loop *fdeventloop;
+	struct asyncio_fdevents_callback_info cbinfo;
 	int oldtype;
 	int oldstate;
 
 	fdhandle_priv = handle_instance;
 	fdeventloop_priv = fdhandle_priv->base.eventloop->instance;
 	fdeventloop = &fdeventloop_priv->pub;
+
+	cbinfo.eventloop = fdeventloop;
+	cbinfo.fd = fdhandle_priv->info.fd;
+	cbinfo.revinfo = fdhandle_priv->revinfo;
+	cbinfo.arg = fdhandle_priv->info.arg;
 
 	/* Set user-defined cancellation settings */
 	if (threadpool_flags & ASYNCIO_THREADPOOL_FLAG_ASYNCCANCEL)
@@ -229,10 +223,22 @@ static void fdevents_handle_callback(void *handle_instance, uint32_t threadpool_
 	else
 		ASYNCIO_SET_CANCELSTATE(ASYNCIO_CANCEL_DISABLE, &oldstate);
 
-	fdhandle_priv->callback_fn(fdeventloop, fdhandle_priv->fd, fdhandle_priv->revinfo, fdhandle_priv->callback_arg, continued);
+	fdhandle_priv->info.cb(&cbinfo, continued);
 
 	ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 	ASYNCIO_RESTORE_CANCELTYPE(oldtype);
+}
+
+static void fdevents_handle_cancelled_callback(void *handle_instance)
+{
+	struct asyncio_fdevents_handle_priv *fdhandle_priv;
+	struct asyncio_fdevents_listen_info *info;
+
+	fdhandle_priv = handle_instance;
+	info = &fdhandle_priv->info;
+
+	if (info->cancelled_cb != NULL)
+		info->cancelled_cb(info->arg);
 }
 
 static int fdevents_initialize_eventloop_thread(void *instance)
@@ -311,23 +317,19 @@ static void fdevents_cleanup_eventloop_thread(void *instance)
 }
 
 /* Public */
-static int fdevents_eventloop_listen(const struct asyncio_fdevents_loop *fdeventloop, int fd, const void *evinfo, asyncio_fdevents_callback cb, void *arg, uint32_t threadpool_flags, struct asyncio_fdevents_handle **handlep)
+static int fdevents_eventloop_listen(const struct asyncio_fdevents_loop *fdeventloop, const struct asyncio_fdevents_listen_info *info, struct asyncio_fdevents_handle **handlep)
 {
 	struct asyncio_fdevents_handle_priv *handle_priv;
 	int oldstate;
 
 	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
 
-	if (cb == NULL) {
+	if (info->cb == NULL) {
 		ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 		return -1;
 	}
 
-	/* XXX We don't need no nonblocking! (for user fds, they can set them if they want) */
-	if (set_nonblocking(fd) != 0) {
-		ASYNCIO_RESTORE_CANCELSTATE(oldstate);
-		return -1;
-	}
+	/* Don't set fd to nonblocking. This is up to the user. */
 
 	handle_priv = asyncio_safe_malloc(1, sizeof *handle_priv);
 
@@ -337,7 +339,7 @@ static int fdevents_eventloop_listen(const struct asyncio_fdevents_loop *fdevent
 		return -1;
 	}
 
-	if (fdeventloop->priv->base.handle_init(&fdeventloop->priv->base, &handle_priv->base, threadpool_flags) != 0) {
+	if (fdeventloop->priv->base.handle_init(&fdeventloop->priv->base, &handle_priv->base, info->threadpool_flags) != 0) {
 		ASYNCIO_ERROR("Failed to init events handle.\n");
 		asyncio_safe_free(handle_priv);
 		ASYNCIO_RESTORE_CANCELSTATE(oldstate);
@@ -352,7 +354,9 @@ static int fdevents_eventloop_listen(const struct asyncio_fdevents_loop *fdevent
 	handle_priv->pub.acquire = fdevents_handle_acquire;
 	handle_priv->pub.release = fdevents_handle_release;
 
-	if (fdeventloop->priv->backend_ops->init_evinfo_revinfo(evinfo, &handle_priv->evinfo, &handle_priv->revinfo) != 0) {
+	handle_priv->info = *info;
+
+	if (fdeventloop->priv->backend_ops->init_evinfo_revinfo(info->evinfo, &handle_priv->evinfo, &handle_priv->revinfo) != 0) {
 		ASYNCIO_ERROR("Failed to init backend evinfo and revinfo for handle.\n");
 		fdeventloop->priv->base.handle_cleanup_before_dispatch(&handle_priv->base);
 		asyncio_safe_free(handle_priv);
@@ -360,9 +364,7 @@ static int fdevents_eventloop_listen(const struct asyncio_fdevents_loop *fdevent
 		return -1;
 	}
 
-	handle_priv->fd = fd;
-	handle_priv->callback_fn = cb;
-	handle_priv->callback_arg = arg;
+	handle_priv->info.evinfo = handle_priv->evinfo;	/* Not really necessary, but avoid having dangling pointers. */
 
 	if (fdeventloop->priv->base.dispatch_handle_to_eventloop(&fdeventloop->priv->base, &handle_priv->base) != 0) {
 		ASYNCIO_ERROR("Failed to dispatch handle to loop.\n");
@@ -374,6 +376,7 @@ static int fdevents_eventloop_listen(const struct asyncio_fdevents_loop *fdevent
 	}
 
 	*handlep = &handle_priv->pub;
+	ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 	return 0;
 }
 
@@ -432,7 +435,7 @@ static int init_fdeventloop_private_data(const struct asyncio_fdevents_options *
 		goto return_;
 	}
 
-	if (set_nonblocking(pipefds[0]) != 0 || set_nonblocking(pipefds[1]) != 0) {
+	if (asyncio_fdevents_set_nonblocking(pipefds[0]) != 0 || asyncio_fdevents_set_nonblocking(pipefds[1]) != 0) {
 		ASYNCIO_ERROR("Failed to set pipefds nonblocking.\n");
 		rc = -1;
 		goto return_pipefds;
@@ -532,6 +535,36 @@ static void fdevents_cleanup_eventloop(void *instance)
 }
 
 /* Public */
+int asyncio_fdevents_set_nonblocking(int fd)
+{
+	int oldflags;
+
+	oldflags = fcntl(fd, F_GETFL);
+
+	if (fcntl(fd, F_SETFL, oldflags | O_NONBLOCK) == -1) {
+		ASYNCIO_SYSERROR("fcntl");
+		return -1;
+	}
+
+	return 0;
+}
+
+/* Public */
+int asyncio_fdevents_set_blocking(int fd)
+{
+	int oldflags;
+
+	oldflags = fcntl(fd, F_GETFL);
+
+	if (fcntl(fd, F_SETFL, oldflags & (~O_NONBLOCK)) == -1) {
+		ASYNCIO_SYSERROR("fcntl");
+		return -1;
+	}
+
+	return 0;
+}
+
+/* Public */
 int asyncio_fdevents_init()
 {
 	int oldstate;
@@ -563,6 +596,7 @@ int asyncio_fdevents_eventloop(const struct asyncio_fdevents_options *options, s
 
 	fdeventloop_priv->base.instance = fdeventloop_priv;
 	fdeventloop_priv->base.backend_callback = fdevents_handle_callback;
+	fdeventloop_priv->base.backend_cancelled_callback = fdevents_handle_cancelled_callback;
 
 	fdeventloop_priv->base.backend_insert_events_handle_locked = fdevents_insert_handle_locked;
 	fdeventloop_priv->base.backend_remove_events_handle_locked = fdevents_remove_handle_locked;

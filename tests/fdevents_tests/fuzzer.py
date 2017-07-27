@@ -8,9 +8,9 @@ import errno
 import sys
 import math
 
-CONNECTIONS_PER_SECOND = 3900
+CONNECTIONS_PER_SECOND = 3900		# Use 900 for selet backend (test3)
 MAXTIME_PER_CONNECTION = 20
-MAX_CONCURRENT_CONNECTIONS = 4000
+MAX_CONCURRENT_CONNECTIONS = 4000	# Use 1000 for select backend (test3)
 GRANULARITY = 1000000
 
 def stddev(values):

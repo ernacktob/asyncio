@@ -16,7 +16,7 @@
 /* PROTOTYPES */
 static void printf_locked(const char *fmt, ...);
 static int create_accept_sock(void);
-static void on_read(const struct asyncio_fdevents_loop *eventloop, int fd, const void *revinfo, void *arg, int *continued);
+static void on_read(const struct asyncio_fdevents_callback_info *info, int *continued);
 /* END PROTOTYPES */
 
 static void printf_locked(const char *fmt, ...)
@@ -51,6 +51,12 @@ static int create_accept_sock(void)
 		return -1;
 	}
 
+	if (asyncio_fdevents_set_nonblocking(accept_sock) != 0) {
+		printf_locked("Failed to set accept_sock to nonblocking.\n");
+		close(accept_sock);
+		return -1;
+	}
+
 /*	my_addr.sin_len = sizeof my_addr; */
 	my_addr.sin_family = AF_INET;
 	my_addr.sin_port = htons(12345);
@@ -78,20 +84,19 @@ static int create_accept_sock(void)
 	return accept_sock;
 }
 
-static void on_read(const struct asyncio_fdevents_loop *eventloop, int fd, const void *revinfo, void *arg, int *continued)
+static void on_read(const struct asyncio_fdevents_callback_info *info, int *continued)
 {
 	const struct asyncio_fdevents_poll_evinfo *pollrevinfo;
 	int client_sock;
 	struct sockaddr dummy_addr;
 	socklen_t dummy_len;
 	char byte;
-	(void)eventloop;
 
-	pollrevinfo = revinfo;
+	pollrevinfo = info->revinfo;
 	dummy_len = sizeof dummy_addr;
-	printf_locked("on_read: revents = %hd, arg = %p\n", pollrevinfo->events, arg);
+	printf_locked("on_read: revents = %hd, arg = %p\n", pollrevinfo->events, info->arg);
 
-	client_sock = accept(fd, &dummy_addr, &dummy_len);
+	client_sock = accept(info->fd, &dummy_addr, &dummy_len);
 
 	if (client_sock < 0) {
 		perror("accept");
@@ -99,14 +104,17 @@ static void on_read(const struct asyncio_fdevents_loop *eventloop, int fd, const
 	}
 
 	printf_locked("Accepted new client!\n");
-
 	send(client_sock, "HELLO WORLD\n", strlen("HELLO WORLD\n"), 0);
 
-	/* Apparently, on OS X, the returned sockets from accept will automatically be set to nonblocking.
-	 * We want an easy way to just block until user types something, so force fcntl to blocking. */
-	fcntl(client_sock, F_SETFL, fcntl(client_sock, F_GETFL) & (~O_NONBLOCK));
-	recv(client_sock, &byte, 1, 0);
+	/* This is needed on OS X because it sets sockets returned from accept
+	 * with a nonblocking accept_sock as nonblocking as well.
+	 * We're setting to to blocking just to see how it will behave if it gets
+	 * stuck in here while waiting for a client to type something. It's a good
+	 * test for cancellations. */
+	if (asyncio_fdevents_set_blocking(client_sock) != 0)
+		printf_locked("Failed to set client sock to blocking.\n");
 
+	recv(client_sock, &byte, 1, 0); /* This should block because we didn't set the client_sock to nonblocking. */
 	close(client_sock);
 
 	*continued = 1;
@@ -117,6 +125,7 @@ int main()
 	struct asyncio_fdevents_options options;
 	struct asyncio_fdevents_loop *eventloop;
 
+	struct asyncio_fdevents_listen_info listen_info;
 	struct asyncio_fdevents_poll_evinfo evinfo;
 	struct asyncio_fdevents_handle *handle;
 
@@ -147,7 +156,10 @@ int main()
 
 	evinfo.events = POLLIN;
 
-	if (eventloop->listen(eventloop, sockfd, &evinfo, on_read, NULL, ASYNCIO_THREADPOOL_FLAG_CANCELLABLE, &handle) != 0) {
+	ASYNCIO_FDEVENTS_LISTEN_INFO_DEFAULT_INIT(listen_info, sockfd, &evinfo, on_read);
+	listen_info.threadpool_flags = ASYNCIO_THREADPOOL_FLAG_CANCELLABLE;
+
+	if (eventloop->listen(eventloop, &listen_info, &handle) != 0) {
 		printf_locked("Failed to listen on eventloop.\n");
 		eventloop->release(eventloop);
 		asyncio_fdevents_cleanup();

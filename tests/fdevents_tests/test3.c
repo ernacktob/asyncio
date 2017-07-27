@@ -1,23 +1,38 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
 #include <string.h>
 #include <stdarg.h>
+#include <sys/errno.h>
 
 #include <unistd.h>
-#include <fcntl.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/resource.h>
+
+#include <pthread.h>
 
 #include "asyncio_fdevents.h"
 #include "asyncio_threadpool.h"
 
+#define CONNECTIONS_PER_SECOND		1000
+#define MAX_CONCURRENT_CONNECTIONS	1000
+#define ACCEPT_LATENCY_MS		5
+#define BACKLOG_SIZE			((((CONNECTIONS_PER_SECOND) * (ACCEPT_LATENCY_MS)) / 1000) * 2)
+
 /* PROTOTYPES */
 static void printf_locked(const char *fmt, ...);
 static int create_accept_sock(void);
-static void on_read(const struct asyncio_fdevents_loop *eventloop, int fd, const void *revinfo, void *arg, int *continued);
+
+static void on_readable(const struct asyncio_fdevents_callback_info *info, int *continued);
+static void on_writable(const struct asyncio_fdevents_callback_info *info, int *continued);
+static void on_connect(const struct asyncio_fdevents_callback_info *info, int *continued);
 /* END PROTOTYPES */
+
+/* GLOBALS */
+static unsigned int count = 0;
+static pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
+/*END GLOBALS */
 
 static void printf_locked(const char *fmt, ...)
 {
@@ -51,6 +66,12 @@ static int create_accept_sock(void)
 		return -1;
 	}
 
+	if (asyncio_fdevents_set_nonblocking(accept_sock) != 0) {
+		printf_locked("Failed to set accept_sock to nonblocking.\n");
+		close(accept_sock);
+		return -1;
+	}
+
 /*	my_addr.sin_len = sizeof my_addr; */
 	my_addr.sin_family = AF_INET;
 	my_addr.sin_port = htons(12345);
@@ -69,7 +90,7 @@ static int create_accept_sock(void)
 		return -1;
 	}
 
-	if (listen(accept_sock, 1) != 0) {
+	if (listen(accept_sock, BACKLOG_SIZE) != 0) {
 		perror("listen");
 		close(accept_sock);
 		return -1;
@@ -78,49 +99,132 @@ static int create_accept_sock(void)
 	return accept_sock;
 }
 
-static void on_read(const struct asyncio_fdevents_loop *eventloop, int fd, const void *revinfo, void *arg, int *continued)
+static void on_readable(const struct asyncio_fdevents_callback_info *info, int *continued)
 {
-	const struct asyncio_fdevents_select_evinfo *selectrevinfo;
-	int client_sock;
-	struct sockaddr dummy_addr;
-	socklen_t dummy_len;
 	char byte;
-	(void)eventloop;
+	ssize_t rb;
 
-	selectrevinfo = revinfo;
-	dummy_len = sizeof dummy_addr;
-	printf_locked("on_read: revents = %hd, arg = %p\n", selectrevinfo->events, arg);
+	rb = recv(info->fd, &byte, sizeof byte, 0);
 
-	client_sock = accept(fd, &dummy_addr, &dummy_len);
-
-	if (client_sock < 0) {
-		perror("accept");
+	if (rb < 0) {
+		printf_locked("recv failed\n");
+		perror("recv");
+		close(info->fd);
+		*continued = 0;
 		return;
 	}
 
-	printf_locked("Accepted new client!\n");
+	if (rb == 0) {
+		close(info->fd);
+		*continued = 0;
+		return;
+	}
 
-	send(client_sock, "HELLO WORLD\n", strlen("HELLO WORLD\n"), 0);
+	if (byte != 'a')
+		printf_locked("Did not receive correct byte.\n");
 
-	/* Apparently, on OS X, the returned sockets from accept will automatically be set to nonblocking.
-	 * We want an easy way to just block until user types something, so force fcntl to blocking. */
-	fcntl(client_sock, F_SETFL, fcntl(client_sock, F_GETFL) & (~O_NONBLOCK));
-	recv(client_sock, &byte, 1, 0);
+	close(info->fd);
+	*continued = 0;
+}
 
-	close(client_sock);
+static void on_writable(const struct asyncio_fdevents_callback_info *info, int *continued)
+{
+	struct asyncio_fdevents_select_evinfo evinfo;
+	struct asyncio_fdevents_handle *handle;
+	struct asyncio_fdevents_listen_info listen_info;
+	ssize_t sb;
+
+	sb = send(info->fd, "HELLO WORLD\n", strlen("HELLO WORLD\n"), 0);
+
+	if (sb < 0) {
+		printf_locked("send failed\n");
+		close(info->fd);
+		*continued = 0;
+		return;
+	}
+
+	evinfo.events = ASYNCIO_FDEVENTS_SELECT_READABLE;
+	ASYNCIO_FDEVENTS_LISTEN_INFO_DEFAULT_INIT(listen_info, info->fd, &evinfo, on_readable);
+
+	if (info->eventloop->listen(info->eventloop, &listen_info, &handle) != 0) {
+		printf_locked("Failed to register on_readable.\n");
+		close(info->fd);
+		*continued = 0;
+		return;
+	}
+
+	handle->release(handle);
+	*continued = 0;
+}
+
+static void on_connect(const struct asyncio_fdevents_callback_info *info, int *continued)
+{
+	struct asyncio_fdevents_select_evinfo evinfo;
+	struct asyncio_fdevents_handle *handle;
+	struct asyncio_fdevents_listen_info listen_info;
+	int client_sock;
+	struct sockaddr dummy_addr;
+	socklen_t dummy_len;
+
+	dummy_len = sizeof dummy_addr;
+
+	client_sock = accept(info->fd, &dummy_addr, &dummy_len);
+
+	while (client_sock > 0) {
+		if (asyncio_fdevents_set_nonblocking(client_sock) != 0) {
+			printf_locked("Failed to set client sock to nonblocking.\n");
+			close(client_sock);
+			break;
+		}
+
+		evinfo.events = ASYNCIO_FDEVENTS_SELECT_WRITABLE;
+		ASYNCIO_FDEVENTS_LISTEN_INFO_DEFAULT_INIT(listen_info, client_sock, &evinfo, on_writable);
+
+		if (info->eventloop->listen(info->eventloop, &listen_info, &handle) != 0) {
+			printf_locked("Failed to register on_writable.\n");
+			close(client_sock);
+		} else {
+			handle->release(handle);
+
+			pthread_mutex_lock(&mtx);
+			++count;
+			pthread_mutex_unlock(&mtx);
+		}
+
+		client_sock = accept(info->fd, &dummy_addr, &dummy_len);
+	}
+
+	if (errno != EWOULDBLOCK) {
+		perror("accept");
+		printf_locked("error during accept.\n");
+		*continued = 0;
+		return;
+	}
 
 	*continued = 1;
 }
 
 int main()
 {
+	struct rlimit rl;
 	struct asyncio_fdevents_options options;
 	struct asyncio_fdevents_loop *eventloop;
-
 	struct asyncio_fdevents_select_evinfo evinfo;
+	struct asyncio_fdevents_listen_info listen_info;
 	struct asyncio_fdevents_handle *handle;
-
 	int sockfd;
+
+	if (getrlimit(RLIMIT_NOFILE, &rl) != 0) {
+		printf_locked("Failed to get rlimit for open files.\n");
+		exit(EXIT_FAILURE);
+	}
+
+	rl.rlim_cur = MAX_CONCURRENT_CONNECTIONS + 10;
+
+	if (setrlimit(RLIMIT_NOFILE, &rl) != 0) {
+		printf_locked("Failed to set rlimit for open files.\n");
+		exit(EXIT_FAILURE);
+	}
 
 	sockfd = create_accept_sock();
 
@@ -135,11 +239,11 @@ int main()
 		exit(EXIT_FAILURE);
 	}
 
-	options.max_nfds = 10000;
+	options.max_nfds = 1010;
 	options.backend_type = ASYNCIO_FDEVENTS_BACKEND_SELECT;
 
 	if (asyncio_fdevents_eventloop(&options, &eventloop) != 0) {
-		printf_locked("Failed to create eventloop.\n");
+		printf_locked("Failed to create fdevents eventloop.\n");
 		asyncio_fdevents_cleanup();
 		close(sockfd);
 		exit(EXIT_FAILURE);
@@ -147,8 +251,11 @@ int main()
 
 	evinfo.events = ASYNCIO_FDEVENTS_SELECT_READABLE;
 
-	if (eventloop->listen(eventloop, sockfd, &evinfo, on_read, NULL, ASYNCIO_THREADPOOL_FLAG_CANCELLABLE, &handle) != 0) {
-		printf_locked("Failed to listen on eventloop.\n");
+	ASYNCIO_FDEVENTS_LISTEN_INFO_DEFAULT_INIT(listen_info, sockfd, &evinfo, on_connect);
+	listen_info.threadpool_flags = ASYNCIO_THREADPOOL_FLAG_CANCELLABLE;
+
+	if (eventloop->listen(eventloop, &listen_info, &handle) != 0) {
+		printf_locked("Failed to listen on event.\n");
 		eventloop->release(eventloop);
 		asyncio_fdevents_cleanup();
 		close(sockfd);
@@ -166,13 +273,10 @@ int main()
 	if (handle->wait(handle) != 0)
 		printf_locked("Failed to join.\n");
 
-	printf_locked("Releasing handle.\n");
+	printf_locked("count = %u\n", count);
 	handle->release(handle);
-	printf_locked("release eventloop.\n");
 	eventloop->release(eventloop);
-	printf_locked("cleanup fdevents\n");
 	asyncio_fdevents_cleanup();
-
 	close(sockfd);
 	return 0;
 }

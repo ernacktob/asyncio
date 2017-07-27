@@ -15,11 +15,9 @@ struct asyncio_fdevents_handle_priv {
 	struct asyncio_fdevents_handle pub;
 	struct events_handle base;
 
-	int fd;
+	struct asyncio_fdevents_listen_info info;
 	void *evinfo;
 	void *revinfo;
-	asyncio_fdevents_callback callback_fn;	/* Called when event occurs */
-	void *callback_arg;
 
 	struct asyncio_fdevents_handle_priv *prev[NUMBER_FDEVENTS_HANDLE_QUEUES];
 	struct asyncio_fdevents_handle_priv *next[NUMBER_FDEVENTS_HANDLE_QUEUES];

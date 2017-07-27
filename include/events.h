@@ -68,6 +68,7 @@ struct events_loop {
 	void *instance;
 
 	void (*backend_callback)(void *handle_instance, uint32_t threadpool_flags, int *continued);
+	void (*backend_cancelled_callback)(void *handle_instance);
 
 	int (*backend_insert_events_handle_locked)(void *eventloop_instance, void *handle_instance);
 	void (*backend_remove_events_handle_locked)(void *eventloop_instance, void *handle_instance);

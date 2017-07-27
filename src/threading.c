@@ -109,7 +109,6 @@ void ASYNCIO_RESTORE_CANCELTYPE(int oldtype)
 
 	ASYNCIO_DEBUG_ENTER(1 ARG("%d", oldtype));
 	ASYNCIO_DEBUG_CALL(3 FUNC(pthread_setcanceltype) ARG("%d", oldtype) ARG("%p", &oldtype1));
-
 	if ((rc = pthread_setcanceltype(oldtype, &oldtype1)) != 0) {
 		errno = rc;
 		ASYNCIO_SYSERROR("pthread_setcanceltype");

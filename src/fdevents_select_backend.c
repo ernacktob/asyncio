@@ -8,7 +8,6 @@
 
 #include "asyncio_fdevents_select.h"
 #include "fdevents_priv.h"
-#include "compile_time_assert.h"
 #include "safe_malloc.h"
 #include "logging.h"
 
@@ -32,6 +31,7 @@ struct select_info {
 	fd_set errorfds;
 
 	/* scratch space */
+	int scratch_max_fd;
 	int scratch_nfds;
 	fd_set scratch_readfds;
 	fd_set scratch_writefds;
@@ -310,6 +310,7 @@ static int fdevents_select_initialize_eventloop_thread(void *backend_data)
 
 	/* nfds argument to select() is max fd plus 1. */
 	selectinfo->scratch_nfds = selectinfo->max_fd + 1;
+	selectinfo->scratch_max_fd = selectinfo->max_fd;
 
 	return 0;
 }
@@ -353,6 +354,7 @@ static void fdevents_select_process_changed_events_locked(void *backend_data)
 
 	/* nfds argument to select() is max fd plus 1. */
 	selectinfo->scratch_nfds = selectinfo->max_fd + 1;
+	selectinfo->scratch_max_fd = selectinfo->max_fd;
 }
 
 static void fdevents_select_scan_for_events_init_locked(void *backend_data)
@@ -371,12 +373,12 @@ static int fdevents_select_scan_for_events_next_locked(void *backend_data, int *
 	selectinfo = backend_data;
 
 	/* Also not the most efficient thing, but who cares, select isn't really meant to be efficient anyway */
-	for (ifd = selectinfo->iterator_fd; ifd <= selectinfo->max_fd; ifd++) {
+	for (ifd = selectinfo->iterator_fd; ifd <= selectinfo->scratch_max_fd; ifd++) {
 		/* Skip the clearwakefd, it is not a user event. */
 		if (ifd == selectinfo->clearwakefd)
 			continue;
 
-		if (FD_ISSET(ifd, &selectinfo->readfds) || FD_ISSET(ifd, &selectinfo->writefds) || FD_ISSET(ifd, &selectinfo->errorfds)) {
+		if (FD_ISSET(ifd, &selectinfo->scratch_readfds) || FD_ISSET(ifd, &selectinfo->scratch_writefds) || FD_ISSET(ifd, &selectinfo->scratch_errorfds)) {
 			selectinfo->iterator_fd = ifd + 1;
 			*fd = ifd;
 			return 1;
@@ -416,9 +418,8 @@ static void fdevents_select_cleanup_eventloop_thread(void *backend_data)
 static int fdevents_select_init_backend_data(void **backend_data, size_t max_nfds, int clearwakefd)
 {
 	struct select_info *selectinfo;
-	COMPILE_TIME_ASSERT(INT_MAX > 0);
 
-	if (max_nfds > INT_MAX) {
+	if (max_nfds > FD_SETSIZE) {
 		ASYNCIO_ERROR("Given max_nfds value too large for select backend.\n");
 		return -1;
 	} else if (max_nfds < 1) {

@@ -17,11 +17,22 @@
 
 #define CONNECTIONS_PER_SECOND		4000
 #define MAX_CONCURRENT_CONNECTIONS	4000
-#define ACCEPT_LATENCY_MS		2
+#define ACCEPT_LATENCY_MS		3
 #define BACKLOG_SIZE			((((CONNECTIONS_PER_SECOND) * (ACCEPT_LATENCY_MS)) / 1000) * 2)
 
-static unsigned int count = 0;
-static pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
+/* PROTOTYPES */
+static void printf_locked(const char *fmt, ...);
+static int create_accept_sock(void);
+
+static void on_readable(const struct asyncio_fdevents_callback_info *info, int *continued);
+static void on_writable(const struct asyncio_fdevents_callback_info *info, int *continued);
+static void on_connect(const struct asyncio_fdevents_callback_info *info, int *continued);
+/* END PROTOTYPES */
+
+/* GLOBALS */
+/*static unsigned int count = 0;
+static pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER; */
+/*END GLOBALS */
 
 static void printf_locked(const char *fmt, ...)
 {
@@ -55,6 +66,12 @@ static int create_accept_sock(void)
 		return -1;
 	}
 
+	if (asyncio_fdevents_set_nonblocking(accept_sock) != 0) {
+		printf_locked("Failed to set accept_sock to nonblocking.\n");
+		close(accept_sock);
+		return -1;
+	}
+
 /*	my_addr.sin_len = sizeof my_addr; */
 	my_addr.sin_family = AF_INET;
 	my_addr.sin_port = htons(12345);
@@ -82,96 +99,107 @@ static int create_accept_sock(void)
 	return accept_sock;
 }
 
-static void on_readable(const struct asyncio_fdevents_loop *eventloop, int fd, const void *revinfo, void *arg, int *continued)
+static void on_readable(const struct asyncio_fdevents_callback_info *info, int *continued)
 {
 	char byte;
 	ssize_t rb;
-	(void)eventloop;
-	(void)revinfo;
-	(void)arg;
-	(void)continued;
 
-	rb = recv(fd, &byte, sizeof byte, 0);
+	rb = recv(info->fd, &byte, sizeof byte, 0);
 
 	if (rb < 0) {
 		printf_locked("recv failed\n");
-		close(fd);
+		close(info->fd);
+		*continued = 0;
 		return;
 	}
 
 	if (rb == 0) {
-		close(fd);
+		close(info->fd);
+		*continued = 0;
 		return;
 	}
 
 	if (byte != 'a')
 		printf_locked("Did not receive correct byte.\n");
 
-	close(fd);
+	close(info->fd);
+	*continued = 0;
 }
 
-static void on_writable(const struct asyncio_fdevents_loop *eventloop, int fd, const void *revinfo, void *arg, int *continued)
+static void on_writable(const struct asyncio_fdevents_callback_info *info, int *continued)
 {
 	struct asyncio_fdevents_poll_evinfo evinfo;
 	struct asyncio_fdevents_handle *handle;
+	struct asyncio_fdevents_listen_info listen_info;
 	ssize_t sb;
-	(void)revinfo;
-	(void)arg;
-	(void)continued;
 
-	sb = send(fd, "HELLO WORLD\n", strlen("HELLO WORLD\n"), 0);
+	sb = send(info->fd, "HELLO WORLD\n", strlen("HELLO WORLD\n"), 0);
 
 	if (sb < 0) {
 		printf_locked("send failed\n");
-		close(fd);
+		close(info->fd);
+		*continued = 0;
 		return;
 	}
 
 	evinfo.events = POLLIN;
+	ASYNCIO_FDEVENTS_LISTEN_INFO_DEFAULT_INIT(listen_info, info->fd, &evinfo, on_readable);
 
-	if (eventloop->listen(eventloop, fd, &evinfo, on_readable, NULL, ASYNCIO_THREADPOOL_FLAG_NONE, &handle) != 0) {
+	if (info->eventloop->listen(info->eventloop, &listen_info, &handle) != 0) {
 		printf_locked("Failed to register on_readable.\n");
-		close(fd);
+		close(info->fd);
+		*continued = 0;
 		return;
 	}
 
 	handle->release(handle);
+	*continued = 0;
 }
 
-static void on_connect(const struct asyncio_fdevents_loop *eventloop, int fd, const void *revinfo, void *arg, int *continued)
+static void on_connect(const struct asyncio_fdevents_callback_info *info, int *continued)
 {
 	struct asyncio_fdevents_poll_evinfo evinfo;
 	struct asyncio_fdevents_handle *handle;
+	struct asyncio_fdevents_listen_info listen_info;
 	int client_sock;
 	struct sockaddr dummy_addr;
 	socklen_t dummy_len;
-	(void)revinfo;
-	(void)arg;
 
 	dummy_len = sizeof dummy_addr;
 
-	client_sock = accept(fd, &dummy_addr, &dummy_len);
+	client_sock = accept(info->fd, &dummy_addr, &dummy_len);
 
 	while (client_sock > 0) {
-		evinfo.events = POLLOUT;
-
-		if (eventloop->listen(eventloop, client_sock, &evinfo, on_writable, NULL, ASYNCIO_THREADPOOL_FLAG_NONE, &handle) != 0) {
-			printf_locked("Failed to register on_writable.\n");
+		if (asyncio_fdevents_set_nonblocking(client_sock) != 0) {
+			printf_locked("Failed to set client sock to nonblocking.\n");
 			close(client_sock);
+			*continued = 0;
+			break;
 		}
 
-		handle->release(handle);
+		evinfo.events = POLLOUT;
+		ASYNCIO_FDEVENTS_LISTEN_INFO_DEFAULT_INIT(listen_info, client_sock, &evinfo, on_writable);
 
-		pthread_mutex_lock(&mtx);
-		++count;
-		pthread_mutex_unlock(&mtx);
+		if (info->eventloop->listen(info->eventloop, &listen_info, &handle) != 0) {
+			printf_locked("Failed to register on_writable.\n");
+			close(client_sock);
+		} else {
+			handle->release(handle);
 
-		client_sock = accept(fd, &dummy_addr, &dummy_len);
+			/* XXX Don't do this if we're cancellable! */
+			/* pthread_mutex_lock(&mtx);
+			++count;
+			pthread_mutex_unlock(&mtx);
+			*/
+		}
+
+		client_sock = accept(info->fd, &dummy_addr, &dummy_len);
 	}
 
 	if (errno != EWOULDBLOCK) {
 		perror("accept");
 		printf_locked("error during accept.\n");
+		*continued = 0;
 		return;
 	}
 
@@ -184,6 +212,7 @@ int main()
 	struct asyncio_fdevents_options options;
 	struct asyncio_fdevents_loop *eventloop;
 	struct asyncio_fdevents_poll_evinfo evinfo;
+	struct asyncio_fdevents_listen_info listen_info;
 	struct asyncio_fdevents_handle *handle;
 	int sockfd;
 
@@ -224,7 +253,10 @@ int main()
 
 	evinfo.events = POLLIN;
 
-	if (eventloop->listen(eventloop, sockfd, &evinfo, on_connect, NULL, ASYNCIO_THREADPOOL_FLAG_CANCELLABLE, &handle) != 0) {
+	ASYNCIO_FDEVENTS_LISTEN_INFO_DEFAULT_INIT(listen_info, sockfd, &evinfo, on_connect);
+	listen_info.threadpool_flags = ASYNCIO_THREADPOOL_FLAG_CANCELLABLE;
+
+	if (eventloop->listen(eventloop, &listen_info, &handle) != 0) {
 		printf_locked("Failed to listen on event.\n");
 		eventloop->release(eventloop);
 		asyncio_fdevents_cleanup();
@@ -243,7 +275,7 @@ int main()
 	if (handle->wait(handle) != 0)
 		printf_locked("Failed to join.\n");
 
-	printf_locked("count = %u\n", count);
+/*	printf_locked("count = %u\n", count); */
 	handle->release(handle);
 	eventloop->release(eventloop);
 	asyncio_fdevents_cleanup();

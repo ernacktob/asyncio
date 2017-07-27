@@ -21,6 +21,7 @@ static void events_handle_cleanup_before_dispatch(struct events_handle *handle);
 
 static void execute_events_callback(void *arg);
 static void events_threadpool_completed(void *arg);
+static void events_threadpool_cancelled(void *arg);
 static int events_dispatch_handle_to_threadpool_locked(struct events_handle *handle);
 
 static void eventloop_thread(void *arg);
@@ -165,7 +166,7 @@ static void events_threadpool_completed(void *arg)
 {
 	struct events_handle *handle;
 
-	handle = (struct events_handle *)arg;
+	handle = arg;
 
 	if (ASYNCIO_MUTEX_LOCK(&handle->eventloop->mtx) != 0) {
 		ASYNCIO_ERROR("Failed to lock handle's eventloop mtx.\n");
@@ -199,6 +200,32 @@ static void events_threadpool_completed(void *arg)
 	}
 }
 
+static void events_threadpool_cancelled(void *arg)
+{
+	struct events_handle *handle;
+
+	handle = arg;
+
+	if (ASYNCIO_MUTEX_LOCK(&handle->eventloop->mtx) != 0) {
+		ASYNCIO_ERROR("Failed to lock handle's eventloop mtx.\n");
+		fatal_error_on_handle(handle);
+		return;
+	}
+
+	/* No danger of double release of handle (in notify_events_handle_finished)
+	 * because it checks whether there actually is a threadpool handle.
+	 * But the point is that we want to release the old threadpool handle even if
+	 * the events handle's lifecycle is not done, in case it is continued. */
+	asyncio_threadpool_release_handle(handle->threadpool_handle);
+	handle->has_threadpool_handle = 0;
+
+	/* Call the backend's cancelled callback. */
+	handle->eventloop->backend_cancelled_callback(handle->instance);
+
+	ASYNCIO_MUTEX_UNLOCK(&handle->eventloop->mtx);
+	notify_events_handle_finished(handle);
+}
+
 static int events_dispatch_handle_to_threadpool_locked(struct events_handle *handle)
 {
 	struct asyncio_threadpool_dispatch_info info;
@@ -209,7 +236,7 @@ static int events_dispatch_handle_to_threadpool_locked(struct events_handle *han
 	info.dispatch_info.arg = handle;
 	info.completed_info.cb = events_threadpool_completed;
 	info.completed_info.arg = handle;
-	info.cancelled_info.cb = events_threadpool_completed;
+	info.cancelled_info.cb = events_threadpool_cancelled;
 	info.cancelled_info.arg = handle;
 
 	if (asyncio_threadpool_dispatch(&info, &threadpool_handle) != 0) {
@@ -351,6 +378,9 @@ static int events_handle_cancel(struct events_handle *handle)
 			success = 0;
 		}
 	} else if (handle->in_eventloop_database) {
+		/* Call the cancelled callback since we never got to threadpool. */
+		handle->eventloop->backend_cancelled_callback(handle->instance);
+
 		/* Means it has not yet been dispatched to threadpool, so eventloop won't have access to handle anymore.
 		 * Note that if it was in a thread, it will have access due to the cancelled callback. */
 		handle->eventloop->backend_remove_events_handle_locked(handle->eventloop->instance, handle->instance);
@@ -491,6 +521,9 @@ static void events_eventloop_release(struct events_loop *eventloop)
 			if (asyncio_threadpool_join(handle->threadpool_handle) != 0)
 				ASYNCIO_ERROR("Failed to join event handle's threadpool handle.\n");
 		} else {
+			/* Call the cancelled callback since threadpool won't do it. */
+			handle->eventloop->backend_cancelled_callback(handle->instance);
+
 			/* Only notify if not in threadpool, because otherwise it gets done in completed callback. */
 			ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
 			notify_events_handle_finished(handle);
