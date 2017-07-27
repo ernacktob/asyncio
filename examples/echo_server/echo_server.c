@@ -28,12 +28,12 @@ struct ConnectionState {
 /* PROTOTYPES */
 static struct ConnectionState *ConnectionState_create(void);
 static void ConnectionState_destroy(struct ConnectionState *state);
-static void ConnectionState_readable(const struct asyncio_fdevents_loop *eventloop, int sockfd, const void *revinfo, void *arg, int *continued);
-static void ConnectionState_writable(const struct asyncio_fdevents_loop *eventloop, int sockfd, const void *revinfo, void *arg, int *continued);
+static void ConnectionState_readable(const struct asyncio_fdevents_callback_info *info, int *continued);
+static void ConnectionState_writable(const struct asyncio_fdevents_callback_info *info, int *continued);
 static void ConnectionState_connected(const struct asyncio_fdevents_loop *eventloop, struct ConnectionState *state, int sockfd);
 
 static int create_accept_sock(void);
-static void accept_clients(const struct asyncio_fdevents_loop *eventloop, int fd, const void *revinfo, void *arg, int *continued);
+static void accept_clients(const struct asyncio_fdevents_callback_info *info, int *continued);
 /* END PROTOTYPES */
 
 static struct ConnectionState *ConnectionState_create(void)
@@ -57,18 +57,21 @@ static void ConnectionState_destroy(struct ConnectionState *state)
 	free(state);
 }
 
-static void ConnectionState_readable(const struct asyncio_fdevents_loop *eventloop, int sockfd, const void *revinfo, void *arg, int *continued)
+static void ConnectionState_readable(const struct asyncio_fdevents_callback_info *info, int *continued)
 {
 	struct ConnectionState *state;
 	const struct asyncio_fdevents_poll_evinfo *pollrevinfo;
 	struct asyncio_fdevents_poll_evinfo evinfo;
+	struct asyncio_fdevents_listen_info listen_info;
 	char *newline;
 	int sendit;
+	int sockfd;
 	struct asyncio_fdevents_handle *handle;
 	ssize_t rb;
 
-	pollrevinfo = revinfo;
-	state = arg;
+	pollrevinfo = info->revinfo;
+	state = info->arg;
+	sockfd = info->fd;
 
 	if (pollrevinfo->events & (POLLERR | POLLHUP | POLLNVAL)) {
 		ConnectionState_destroy(state);
@@ -101,7 +104,10 @@ static void ConnectionState_readable(const struct asyncio_fdevents_loop *eventlo
 	if (sendit) {
 		evinfo.events = POLLOUT;
 
-		if (eventloop->listen(eventloop, sockfd, &evinfo, ConnectionState_writable, state, ASYNCIO_THREADPOOL_FLAG_NONE, &handle) != 0) {
+		ASYNCIO_FDEVENTS_LISTEN_INFO_DEFAULT_INIT(listen_info, sockfd, &evinfo, ConnectionState_writable);
+		listen_info.arg = state;
+
+		if (info->eventloop->listen(info->eventloop, &listen_info, &handle) != 0) {
 			fprintf(stderr, "Failed to register fdevent.\n");
 			ConnectionState_destroy(state);
 			close(sockfd);
@@ -114,16 +120,19 @@ static void ConnectionState_readable(const struct asyncio_fdevents_loop *eventlo
 	}
 }
 
-static void ConnectionState_writable(const struct asyncio_fdevents_loop *eventloop, int sockfd, const void *revinfo, void *arg, int *continued)
+static void ConnectionState_writable(const struct asyncio_fdevents_callback_info *info, int *continued)
 {
 	struct ConnectionState *state;
 	const struct asyncio_fdevents_poll_evinfo *pollrevinfo;
 	struct asyncio_fdevents_poll_evinfo evinfo;
+	struct asyncio_fdevents_listen_info listen_info;
 	struct asyncio_fdevents_handle *handle;
+	int sockfd;
 	ssize_t sb;
 
-	pollrevinfo = revinfo;
-	state = arg;
+	pollrevinfo = info->revinfo;
+	state = info->arg;
+	sockfd = info->fd;
 
 	if (pollrevinfo->events & (POLLERR | POLLHUP | POLLNVAL)) {
 		ConnectionState_destroy(state);
@@ -148,7 +157,10 @@ static void ConnectionState_writable(const struct asyncio_fdevents_loop *eventlo
 
 		evinfo.events = POLLIN;
 
-		if (eventloop->listen(eventloop, sockfd, &evinfo, ConnectionState_readable, state, ASYNCIO_THREADPOOL_FLAG_NONE, &handle) != 0) {
+		ASYNCIO_FDEVENTS_LISTEN_INFO_DEFAULT_INIT(listen_info, sockfd, &evinfo, ConnectionState_readable);
+		listen_info.arg = state;
+
+		if (info->eventloop->listen(info->eventloop, &listen_info, &handle) != 0) {
 			fprintf(stderr, "Failed to register fdevent.\n");
 			ConnectionState_destroy(state);
 			close(sockfd);
@@ -165,6 +177,7 @@ static void ConnectionState_connected(const struct asyncio_fdevents_loop *eventl
 {
 	const char *greeting = "Welcome to the echo server.\nType a line of at most 1000 characters, and it will be echoed back.\n\n";
 	struct asyncio_fdevents_poll_evinfo evinfo;
+	struct asyncio_fdevents_listen_info listen_info;
 	struct asyncio_fdevents_handle *handle;
 
 	strncpy(state->echostr, greeting, MAX_STRLEN);
@@ -174,7 +187,10 @@ static void ConnectionState_connected(const struct asyncio_fdevents_loop *eventl
 
 	evinfo.events = POLLOUT;
 
-	if (eventloop->listen(eventloop, sockfd, &evinfo, ConnectionState_writable, state, ASYNCIO_THREADPOOL_FLAG_NONE, &handle) != 0) {
+	ASYNCIO_FDEVENTS_LISTEN_INFO_DEFAULT_INIT(listen_info, sockfd, &evinfo, ConnectionState_writable);
+	listen_info.arg = state;
+
+	if (eventloop->listen(eventloop, &listen_info, &handle) != 0) {
 		fprintf(stderr, "Failed to register fdevent.\n");
 		return;
 	}
@@ -198,6 +214,12 @@ static int create_accept_sock(void)
 	/* Set REUSEADDR on accept_sock to be able to bind to address next time we run immediately. */
 	if (setsockopt(accept_sock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one) != 0) {
 		perror("setsockopt");
+		close(accept_sock);
+		return -1;
+	}
+
+	if (asyncio_fdevents_set_nonblocking(accept_sock) != 0) {
+		fprintf(stderr, "Failed to set accept_sock nonblocking.\n");
 		close(accept_sock);
 		return -1;
 	}
@@ -228,28 +250,32 @@ static int create_accept_sock(void)
 	return accept_sock;
 }
 
-static void accept_clients(const struct asyncio_fdevents_loop *eventloop, int fd, const void *revinfo, void *arg, int *continued)
+static void accept_clients(const struct asyncio_fdevents_callback_info *info, int *continued)
 {
 	struct ConnectionState *state;
 	int client_sock;
 	struct sockaddr dummy_addr;
 	socklen_t dummy_len;
-	(void)revinfo;
-	(void)arg;
 
 	dummy_len = sizeof dummy_addr;
 
-	client_sock = accept(fd, &dummy_addr, &dummy_len);
+	client_sock = accept(info->fd, &dummy_addr, &dummy_len);
 
 	while (client_sock > 0) {
+		if (asyncio_fdevents_set_nonblocking(client_sock) != 0) {
+			fprintf(stderr, "Failed to set client_sock nonblocking.\n");
+			close(client_sock);
+			return;
+		}
+
 		state = ConnectionState_create();
 
 		if (state == NULL)
 			fprintf(stderr, "Failed to create ConnectionState\n");
 		else
-			ConnectionState_connected(eventloop, state, client_sock);
+			ConnectionState_connected(info->eventloop, state, client_sock);
 
-		client_sock = accept(fd, &dummy_addr, &dummy_len);
+		client_sock = accept(info->fd, &dummy_addr, &dummy_len);
 	}
 
 	if (errno != EWOULDBLOCK) {
@@ -265,6 +291,7 @@ int main()
 	struct asyncio_fdevents_options options;
 	struct asyncio_fdevents_loop *eventloop;
 	struct asyncio_fdevents_poll_evinfo evinfo;
+	struct asyncio_fdevents_listen_info listen_info;
 	struct asyncio_fdevents_handle *handle;
 	int accept_sockfd;
 
@@ -292,8 +319,9 @@ int main()
 	}
 
 	evinfo.events = POLLIN;
+	ASYNCIO_FDEVENTS_LISTEN_INFO_DEFAULT_INIT(listen_info, accept_sockfd, &evinfo, accept_clients);
 
-	if (eventloop->listen(eventloop, accept_sockfd, &evinfo, accept_clients, NULL, ASYNCIO_THREADPOOL_FLAG_NONE, &handle) != 0) {
+	if (eventloop->listen(eventloop, &listen_info, &handle) != 0) {
 		fprintf(stderr, "Failed to listen for fdevent.\n");
 		eventloop->release(eventloop);
 		close(accept_sockfd);
