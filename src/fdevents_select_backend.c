@@ -11,6 +11,10 @@
 #include "safe_malloc.h"
 #include "logging.h"
 
+/* TODO: Make the ASYNCIO_FDEVENTS_SELECT_ERRORED event
+ * usable by more than one handle at a time (for the same fd).
+ * This would allow both a read and write callback to also process errors. */
+
 /* STRUCT DEFINITIONS */
 struct select_info {
 	int max_nfds;

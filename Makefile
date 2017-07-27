@@ -1,4 +1,5 @@
-CFLAGS = -Wall -Wextra -Werror -Wmissing-prototypes -pedantic -std=c89 -fPIC -DMALLOC_IS_THREAD_SAFE
+COMMON_CFLAGS = -O2 -Wall -Wextra -Werror -Wmissing-prototypes -pedantic -std=c89
+CFLAGS = $(COMMON_CFLAGS) -fPIC -DMALLOC_IS_THREAD_SAFE
 UNAME = $(shell uname)
 
 ifeq ($(UNAME), Darwin)
@@ -13,6 +14,7 @@ USER_CFLAGS = -Wl,-rpath=$(shell pwd)		# Tell linker where to look for libasynci
 LIBS = -lpthread -lrt
 endif
 
+export COMMON_CFLAGS
 export USER_CFLAGS	# Make available for sub-makes
 export LIBS
 export UNAME

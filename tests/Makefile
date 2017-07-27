@@ -1,7 +1,6 @@
 IDIR = ../include
 LIBS += -lasyncio
 CC = gcc
-CFLAGS = -Wall -Wextra -Werror -Wmissing-prototypes -pedantic -std=c89 -DMALLOC_IS_THREAD_SAFE
 
 .PHONY: all incdir libfile header_files clean
 
