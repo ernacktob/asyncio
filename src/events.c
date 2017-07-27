@@ -315,7 +315,7 @@ static int events_handle_wait(struct events_handle *handle, int old_cancelstate)
 {
 	int oldstate;
 	int oldtype;
-	int success = 1;
+	int success;
 
 	if (ASYNCIO_MUTEX_LOCK(&handle->eventloop->mtx) != 0) {
 		ASYNCIO_ERROR("Failed to lock eventloop mtx.\n");
@@ -331,6 +331,8 @@ static int events_handle_wait(struct events_handle *handle, int old_cancelstate)
 	 * that the eventloop mtx is locked during the cleanup handler. */
 	ASYNCIO_SET_CANCELTYPE(ASYNCIO_CANCEL_DEFERRED, &oldtype);
 	ASYNCIO_RESTORE_CANCELSTATE(old_cancelstate);
+
+	success = 1;
 
 	while (!(handle->finished)) {
 		if (ASYNCIO_COND_WAIT(&handle->finished_cond, &handle->eventloop->mtx) != 0) {

@@ -966,7 +966,7 @@ int asyncio_threadpool_join(struct asyncio_threadpool_handle *handle)
 {
 	int oldstate;
 	int oldtype;
-	int success = 1;
+	int success;
 	int rc;
 
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", thandle));
@@ -987,6 +987,8 @@ int asyncio_threadpool_join(struct asyncio_threadpool_handle *handle)
 	 * that the mtx is locked during the cleanup handler. */
 	ASYNCIO_SET_CANCELTYPE(ASYNCIO_CANCEL_DEFERRED, &oldtype);
 	ASYNCIO_RESTORE_CANCELSTATE(oldstate);
+
+	success = 1;
 
 	while (!(handle->finished)) {
 		if (ASYNCIO_COND_WAIT(&handle->finished_cond, &threadpool_mtx) != 0) {
