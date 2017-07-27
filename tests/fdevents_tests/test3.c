@@ -233,18 +233,11 @@ int main()
 		exit(EXIT_FAILURE);
 	}
 
-	if (asyncio_fdevents_init() != 0) {
-		printf_locked("Failed to initialize fdevents module.\n");
-		close(sockfd);
-		exit(EXIT_FAILURE);
-	}
-
 	options.max_nfds = 1010;
 	options.backend_type = ASYNCIO_FDEVENTS_BACKEND_SELECT;
 
 	if (asyncio_fdevents_eventloop(&options, &eventloop) != 0) {
 		printf_locked("Failed to create fdevents eventloop.\n");
-		asyncio_fdevents_cleanup();
 		close(sockfd);
 		exit(EXIT_FAILURE);
 	}
@@ -257,7 +250,6 @@ int main()
 	if (eventloop->listen(eventloop, &listen_info, &handle) != 0) {
 		printf_locked("Failed to listen on event.\n");
 		eventloop->release(eventloop);
-		asyncio_fdevents_cleanup();
 		close(sockfd);
 		exit(EXIT_FAILURE);
 	}
@@ -276,7 +268,6 @@ int main()
 	printf_locked("count = %u\n", count);
 	handle->release(handle);
 	eventloop->release(eventloop);
-	asyncio_fdevents_cleanup();
 	close(sockfd);
 	return 0;
 }

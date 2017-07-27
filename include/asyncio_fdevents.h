@@ -76,8 +76,6 @@ struct asyncio_fdevents_loop {
 int asyncio_fdevents_set_nonblocking(int fd);
 int asyncio_fdevents_set_blocking(int fd);
 
-int asyncio_fdevents_init(void);
 int asyncio_fdevents_eventloop(const struct asyncio_fdevents_options *options, struct asyncio_fdevents_loop **eventloop);
-void asyncio_fdevents_cleanup(void);
 
 #endif

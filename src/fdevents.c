@@ -49,7 +49,7 @@ static void fdevents_cleanup_eventloop(void *instance);
 /* END PROTOTYPES */
 
 /* GLOBALS */
-static struct fdevents_backend_ops *fdevents_backend_ops_list[ASYNCIO_FDEVENTS_MAX_BACKEND_TYPES] = {NULL};
+static struct fdevents_backend_ops *fdevents_backend_ops_list[ASYNCIO_FDEVENTS_MAX_BACKEND_TYPES] = {&asyncio_fdevents_poll_backend_ops, &asyncio_fdevents_select_backend_ops};
 /* END GLOBALS */
 
 static int fdevents_insert_handle_locked(void *eventloop_instance, void *handle_instance)
@@ -565,25 +565,13 @@ int asyncio_fdevents_set_blocking(int fd)
 }
 
 /* Public */
-int asyncio_fdevents_init()
-{
-	int oldstate;
-
-	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
-
-	fdevents_backend_ops_list[ASYNCIO_FDEVENTS_BACKEND_POLL] = &asyncio_fdevents_poll_backend_ops;
-	fdevents_backend_ops_list[ASYNCIO_FDEVENTS_BACKEND_SELECT] = &asyncio_fdevents_select_backend_ops;
-
-	ASYNCIO_RESTORE_CANCELSTATE(oldstate);
-
-	return 0;
-}
-
-/* Public */
 int asyncio_fdevents_eventloop(const struct asyncio_fdevents_options *options, struct asyncio_fdevents_loop **eventloop)
 {
 	struct asyncio_fdevents_loop_priv *fdeventloop_priv;
 	int oldstate;
+	COMPILE_TIME_ASSERT(ASYNCIO_FDEVENTS_BACKEND_POLL == 0);
+	COMPILE_TIME_ASSERT(ASYNCIO_FDEVENTS_BACKEND_SELECT == 1);
+	COMPILE_TIME_ASSERT(ASYNCIO_FDEVENTS_MAX_BACKEND_TYPES == 2);
 
 	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
 	fdeventloop_priv = asyncio_safe_malloc(1, sizeof *fdeventloop_priv);
@@ -636,11 +624,4 @@ int asyncio_fdevents_eventloop(const struct asyncio_fdevents_options *options, s
 	*eventloop = &fdeventloop_priv->pub;
 	ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 	return 0;
-}
-
-/* Public */
-void asyncio_fdevents_cleanup()
-{
-	/* Nothing to do here */
-	return;
 }

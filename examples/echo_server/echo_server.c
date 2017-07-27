@@ -295,16 +295,10 @@ int main()
 	struct asyncio_fdevents_handle *handle;
 	int accept_sockfd;
 
-	if (asyncio_fdevents_init() != 0) {
-		fprintf(stderr, "Failed to init asyncio fdevents.\n");
-		return -1;
-	}
-
 	accept_sockfd = create_accept_sock();
 
 	if (accept_sockfd == -1) {
 		fprintf(stderr, "Failed to create accept sock.\n");
-		asyncio_fdevents_cleanup();
 		return -1;
 	}
 
@@ -314,7 +308,6 @@ int main()
 	if (asyncio_fdevents_eventloop(&options, &eventloop) != 0) {
 		fprintf(stderr, "Failed to create eventloop.\n");
 		close(accept_sockfd);
-		asyncio_fdevents_cleanup();
 		return -1;
 	}
 
@@ -325,7 +318,6 @@ int main()
 		fprintf(stderr, "Failed to listen for fdevent.\n");
 		eventloop->release(eventloop);
 		close(accept_sockfd);
-		asyncio_fdevents_cleanup();
 		return -1;
 	}
 
@@ -334,14 +326,12 @@ int main()
 		fprintf(stderr, "Failed to wait handle.\n");
 		eventloop->release(eventloop);
 		close(accept_sockfd);
-		asyncio_fdevents_cleanup();
 		return -1;
 	}
 
 	handle->release(handle);
 	eventloop->release(eventloop);
 	close(accept_sockfd);
-	asyncio_fdevents_cleanup();
 
 	return 0;
 }
