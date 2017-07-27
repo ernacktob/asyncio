@@ -20,10 +20,10 @@ size_t ncreators = 0;
 
 void do_stuff(void *arg)
 {
-	int j;
+	int *j;
 
-	j = *(int *)&arg;
-	usleep(j * 10000);
+	j = arg;
+	usleep((*j) * 10000);
 }
 
 void create_threads(void *arg)
@@ -31,6 +31,7 @@ void create_threads(void *arg)
 	struct asyncio_threadpool_handle *handles[NUM_TASKS];
 	struct asyncio_threadpool_dispatch_info info;
 	struct asyncio_threadpool_handle *create_handle;
+	int args[NUM_TASKS];
 	int i;
 
 	(void)arg;
@@ -47,7 +48,8 @@ void create_threads(void *arg)
 	info.cancelled_info.cb = NULL;
 
 	for (i = 0; i < NUM_TASKS; i++) {
-		info.dispatch_info.arg = *(void **)&i;
+		args[i] = i;
+		info.dispatch_info.arg = &args[i];
 
 		if (asyncio_threadpool_dispatch(&info, &handles[i]) != 0)
 			printf("Failed to dispatch task #%d\n", i);
