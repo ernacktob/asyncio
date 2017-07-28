@@ -207,7 +207,6 @@ static void on_connect(const struct asyncio_fdevents_callback_info *info, int *c
 int main()
 {
 	struct rlimit rl;
-	struct asyncio_fdevents_options options;
 	struct asyncio_fdevents_loop *eventloop;
 	struct asyncio_fdevents_select_evinfo evinfo;
 	struct asyncio_fdevents_listen_info listen_info;
@@ -233,10 +232,7 @@ int main()
 		exit(EXIT_FAILURE);
 	}
 
-	options.max_nfds = 1010;
-	options.backend_type = ASYNCIO_FDEVENTS_BACKEND_SELECT;
-
-	if (asyncio_fdevents_eventloop(&options, &eventloop) != 0) {
+	if (asyncio_fdevents_eventloop(1010, ASYNCIO_FDEVENTS_BACKEND_SELECT, NULL, &eventloop) != 0) {
 		printf_locked("Failed to create fdevents eventloop.\n");
 		close(sockfd);
 		exit(EXIT_FAILURE);

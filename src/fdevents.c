@@ -42,10 +42,10 @@ static int fdevents_eventloop_listen(const struct asyncio_fdevents_loop *fdevent
 static int fdevents_eventloop_acquire(const struct asyncio_fdevents_loop *fdeventloop); /* PUBLIC */
 static void fdevents_eventloop_release(const struct asyncio_fdevents_loop *fdeventloop); /* PUBLIC */
 
-static int init_fdeventloop_private_data(const struct asyncio_fdevents_options *options, struct asyncio_fdevents_loop_priv *fdeventloop_priv);
+static int init_fdeventloop_private_data(size_t max_nfds, unsigned int backend_type, struct asyncio_fdevents_loop_priv *fdeventloop_priv);
 static void fdevents_wakeup_eventloop_locked(void *instance);
 static void fdevents_clearwake_eventloop_locked(void *instance);
-static void fdevents_cleanup_eventloop(void *instance);
+static void fdevents_eventloop_destructor(void *instance);
 /* END PROTOTYPES */
 
 /* GLOBALS */
@@ -137,9 +137,6 @@ static void fdevents_cleanup_events_handle(void *eventloop_instance, void *handl
 
 	fdeventloop_priv = eventloop_instance;
 	fdhandle_priv = handle_instance;
-
-	if (fdhandle_priv->info.release_cb != NULL)
-		fdhandle_priv->info.release_cb(fdhandle_priv->info.arg);
 
 	fdeventloop_priv->backend_ops->cleanup_evinfo_revinfo(fdhandle_priv->evinfo, fdhandle_priv->revinfo);
 	asyncio_safe_free(fdhandle_priv);
@@ -403,31 +400,31 @@ static void fdevents_eventloop_release(const struct asyncio_fdevents_loop *fdeve
 	ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 }
 
-static int init_fdeventloop_private_data(const struct asyncio_fdevents_options *options, struct asyncio_fdevents_loop_priv *fdeventloop_priv)
+static int init_fdeventloop_private_data(size_t max_nfds, unsigned int backend_type, struct asyncio_fdevents_loop_priv *fdeventloop_priv)
 {
 	int pipefds[2];
 	int rc;
 
-	if (options->backend_type >= ASYNCIO_FDEVENTS_MAX_BACKEND_TYPES) {
+	if (backend_type >= ASYNCIO_FDEVENTS_MAX_BACKEND_TYPES) {
 		ASYNCIO_ERROR("Invalid fdevents backend type.\n");
 		rc = -1;
 		goto return_;
 	}
 
-	if (fdevents_backend_ops_list[options->backend_type] == NULL) {
+	if (fdevents_backend_ops_list[backend_type] == NULL) {
 		ASYNCIO_ERROR("Invalid fdevents backend type.\n");
 		rc = -1;
 		goto return_;
 	}
 
 	/* Since we are adding one descriptor ourselves, should check for overflow */
-	if (options->max_nfds > SIZET_MAX - 1) {
+	if (max_nfds > SIZET_MAX - 1) {
 		ASYNCIO_ERROR("The max_nfds option for fdevents is too large.\n");
 		rc = -1;
 		goto return_;
 	}
 
-	fdeventloop_priv->backend_ops = fdevents_backend_ops_list[options->backend_type];
+	fdeventloop_priv->backend_ops = fdevents_backend_ops_list[backend_type];
 
 	if (pipe(pipefds) != 0) {
 		ASYNCIO_SYSERROR("pipe");
@@ -442,14 +439,14 @@ static int init_fdeventloop_private_data(const struct asyncio_fdevents_options *
 	}
 
 	/* The user nfds and also one for the clearwakefd. */
-	if (fdeventloop_priv->backend_ops->init_backend_data(&fdeventloop_priv->backend_data, options->max_nfds + 1, pipefds[0]) != 0) {
+	if (fdeventloop_priv->backend_ops->init_backend_data(&fdeventloop_priv->backend_data, max_nfds + 1, pipefds[0]) != 0) {
 		ASYNCIO_ERROR("Failed to init fdevents backend data.\n");
 		rc = -1;
 		goto return_pipefds;
 	}
 
 	/* The wakefd does not have any callbacks */
-	fdeventloop_priv->callbacks = asyncio_safe_malloc(options->max_nfds, sizeof *(fdeventloop_priv->callbacks));
+	fdeventloop_priv->callbacks = asyncio_safe_malloc(max_nfds, sizeof *(fdeventloop_priv->callbacks));
 
 	if (fdeventloop_priv->callbacks == NULL) {
 		ASYNCIO_ERROR("Failed to malloc fdeventloop callbacks.\n");
@@ -458,7 +455,7 @@ static int init_fdeventloop_private_data(const struct asyncio_fdevents_options *
 	}
 
 	/* No need to insert wake pipefd[0] in hashtable. */
-	if (asyncio_hashtable_init(&fdeventloop_priv->fd_map, options->max_nfds) != 0) {
+	if (asyncio_hashtable_init(&fdeventloop_priv->fd_map, max_nfds) != 0) {
 		ASYNCIO_ERROR("Failed to init fdeventloop_priv fd_map.\n");
 		rc = -1;
 		goto return_callbacks;
@@ -515,7 +512,7 @@ static void fdevents_clearwake_eventloop_locked(void *instance)
 		ASYNCIO_ERROR("Read invalid dummy value.\n");
 }
 
-static void fdevents_cleanup_eventloop(void *instance)
+static void fdevents_eventloop_destructor(void *instance)
 {
 	struct asyncio_fdevents_loop_priv *fdeventloop_priv;
 
@@ -565,13 +562,14 @@ int asyncio_fdevents_set_blocking(int fd)
 }
 
 /* Public */
-int asyncio_fdevents_eventloop(const struct asyncio_fdevents_options *options, struct asyncio_fdevents_loop **eventloop)
+int asyncio_fdevents_eventloop(size_t max_nfds, unsigned int backend_type, const void *opts, struct asyncio_fdevents_loop **eventloop)
 {
 	struct asyncio_fdevents_loop_priv *fdeventloop_priv;
 	int oldstate;
 	COMPILE_TIME_ASSERT(ASYNCIO_FDEVENTS_BACKEND_POLL == 0);
 	COMPILE_TIME_ASSERT(ASYNCIO_FDEVENTS_BACKEND_SELECT == 1);
 	COMPILE_TIME_ASSERT(ASYNCIO_FDEVENTS_MAX_BACKEND_TYPES == 2);
+	(void)opts;
 
 	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
 	fdeventloop_priv = asyncio_safe_malloc(1, sizeof *fdeventloop_priv);
@@ -599,14 +597,14 @@ int asyncio_fdevents_eventloop(const struct asyncio_fdevents_options *options, s
 
 	fdeventloop_priv->base.backend_wakeup_eventloop_locked = fdevents_wakeup_eventloop_locked;
 	fdeventloop_priv->base.backend_clearwake_eventloop_locked = fdevents_clearwake_eventloop_locked;
-	fdeventloop_priv->base.backend_cleanup_eventloop = fdevents_cleanup_eventloop;
+	fdeventloop_priv->base.backend_destructor = fdevents_eventloop_destructor;
 
 	fdeventloop_priv->pub.priv = fdeventloop_priv;
 	fdeventloop_priv->pub.acquire = fdevents_eventloop_acquire;
 	fdeventloop_priv->pub.release = fdevents_eventloop_release;
 	fdeventloop_priv->pub.listen = fdevents_eventloop_listen;
 
-	if (init_fdeventloop_private_data(options, fdeventloop_priv) != 0) {
+	if (init_fdeventloop_private_data(max_nfds, backend_type, fdeventloop_priv) != 0) {
 		ASYNCIO_ERROR("Failed to initialize fdeventloop private data.\n");
 		asyncio_safe_free(fdeventloop_priv);
 		ASYNCIO_RESTORE_CANCELSTATE(oldstate);
@@ -616,7 +614,7 @@ int asyncio_fdevents_eventloop(const struct asyncio_fdevents_options *options, s
 	/* This needs to happen after the previous initializations because it uses them. */
 	if (asyncio_events_eventloop(&fdeventloop_priv->base) != 0) {
 		ASYNCIO_ERROR("Failed to create backend base events_loop.\n");
-		fdevents_cleanup_eventloop(fdeventloop_priv); /* This also frees it. */
+		fdevents_eventloop_destructor(fdeventloop_priv); /* This also frees it. */
 		ASYNCIO_RESTORE_CANCELSTATE(oldstate);
 		return -1;
 	}

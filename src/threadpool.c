@@ -10,6 +10,7 @@
 #include "safe_malloc.h"
 #include "logging.h"
 #include "threading.h"
+#include "refcounts.h"
 
 #define MAX_WORKER_THREADS		5
 #define MAX_CONTRACTORS			1024
@@ -21,7 +22,7 @@
 
 /* STRUCT DEFINITIONS */
 struct asyncio_threadpool_handle {
-	unsigned long refcount;
+	struct refcount_base refcount;
 
 	struct asyncio_threadpool_dispatch_info info;
 
@@ -72,8 +73,8 @@ static int pull_reaper_task(struct asyncio_threadpool_handle **handlep, int *sto
 static int dispatch_contractor(struct asyncio_threadpool_handle *handle);
 static int dispatch_worker(struct asyncio_threadpool_handle *handle);
 
-static int init_threadpool_handle(struct asyncio_threadpool_handle *handle, const struct asyncio_threadpool_dispatch_info *task);
-static void cleanup_threadpool_handle(struct asyncio_threadpool_handle *handle);
+static struct asyncio_threadpool_handle *threadpool_handle_create(const struct asyncio_threadpool_dispatch_info *task);
+static void threadpool_handle_destructor(void *instance);
 
 static void stop_manager_thread(void);
 /* END PROTOTYPES */
@@ -609,11 +610,21 @@ static int pull_reaper_task(struct asyncio_threadpool_handle **handlep, int *sto
 	return 0;
 }
 
-static int init_threadpool_handle(struct asyncio_threadpool_handle *handle, const struct asyncio_threadpool_dispatch_info *task)
+static struct asyncio_threadpool_handle *threadpool_handle_create(const struct asyncio_threadpool_dispatch_info *task)
 {
-	ASYNCIO_DEBUG_ENTER(2 ARG("%p", handle) ARG("%p", task));
+	struct asyncio_threadpool_handle *handle;
+
+	ASYNCIO_DEBUG_ENTER(1 ARG("%p", task));
+
+	handle = asyncio_safe_malloc(1, sizeof *handle);
+
+	if (handle == NULL) {
+		ASYNCIO_ERROR("Failed to malloc threadpool handle.\n");
+		ASYNCIO_DEBUG_RETURN(RET("%p", NULL));
+		return NULL;
+	}
+
 	handle->info = *task;
-	handle->refcount = 0;
 	handle->finished = 0;
 	handle->reached_cleanup = 0;
 	handle->completed_normally = 0;
@@ -621,20 +632,41 @@ static int init_threadpool_handle(struct asyncio_threadpool_handle *handle, cons
 	handle->in_worker_thread = 0;
 	handle->in_worker_queue = 0;
 
-	if (ASYNCIO_COND_INIT(&handle->finished_cond) != 0) {
-		ASYNCIO_ERROR("Failed to initialize finished_cond.\n");
-		ASYNCIO_DEBUG_RETURN(RET("%d", -1));
-		return -1;
+	/* The caller must have a reference by default to prevent race conditions
+	 * where the task completes before the client had a chance to acquire the
+	 * handle. Also the contractor or worker thread must have a reference to
+	 * prevent the case where the client releases its handle before the worker
+	 * or contractor manages to acquire its handle */
+	if (asyncio_refcount_init(&handle->refcount, handle, threadpool_handle_destructor, 2) != 0) {
+		ASYNCIO_ERROR("Failed to init threadpool handle refcount.\n");
+		asyncio_safe_free(handle);
+		ASYNCIO_DEBUG_RETURN(RET("%p", NULL));
+		return NULL;
 	}
 
-	ASYNCIO_DEBUG_RETURN(RET("%d", 0));
-	return 0;
+	if (ASYNCIO_COND_INIT(&handle->finished_cond) != 0) {
+		ASYNCIO_ERROR("Failed to initialize finished_cond.\n");
+		asyncio_refcount_deinit(&handle->refcount);
+		asyncio_safe_free(handle);
+		ASYNCIO_DEBUG_RETURN(RET("%p", NULL));
+		return NULL;
+	}
+
+	ASYNCIO_DEBUG_RETURN(RET("%p", handle));
+	return handle;
 }
 
-static void cleanup_threadpool_handle(struct asyncio_threadpool_handle *handle)
+static void threadpool_handle_destructor(void *instance)
 {
-	ASYNCIO_DEBUG_ENTER(1 ARG("%p", handle));
+	struct asyncio_threadpool_handle *handle;
+
+	ASYNCIO_DEBUG_ENTER(1 ARG("%p", instance));
+
+	handle = instance;
+
 	ASYNCIO_COND_DESTROY(&handle->finished_cond);
+	asyncio_safe_free(handle);
+
 	ASYNCIO_DEBUG_RETURN(VOIDRET);
 }
 
@@ -815,25 +847,13 @@ int asyncio_threadpool_dispatch(const struct asyncio_threadpool_dispatch_info *t
 		goto return_initialization_lock;
 	}
 
-	handle = asyncio_safe_malloc(1, sizeof *handle);
+	handle = threadpool_handle_create(task);
 
 	if (handle == NULL) {
-		ASYNCIO_ERROR("safe_malloc failed.\n");
+		ASYNCIO_ERROR("Failed to create threadpool handle.\n");
 		rc = -1;
 		goto return_initialization_lock;
 	}
-
-	if (init_threadpool_handle(handle, task) != 0) {
-		rc = -1;
-		goto return_free_handle;
-	}
-
-	/* The caller must have a reference by default to prevent race conditions
-	 * where the task completes before the client had a chance to acquire the
-	 * handle. Also the contractor or worker thread must have a reference to
-	 * prevent the case where the client releases its handle before the worker
-	 * or contractor manages to acquire its handle */
-	handle->refcount = 2;
 
 	/* Creating contractor threads seems to be much slower than dispatching to
 	 * the fixed number of worker threads, so only use them for tasks that are gonna
@@ -868,11 +888,8 @@ int asyncio_threadpool_dispatch(const struct asyncio_threadpool_dispatch_info *t
 		}
 	}
 
-	cleanup_threadpool_handle(handle);
+	threadpool_handle_destructor(handle);
 	rc = -1;
-
-return_free_handle:
-	asyncio_safe_free(handle);
 
 return_initialization_lock:
 	ASYNCIO_RWLOCK_UNLOCK(&initialization_lock);
@@ -1021,30 +1038,13 @@ int asyncio_threadpool_acquire_handle(struct asyncio_threadpool_handle *handle)
 	int rc;
 
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", thandle));
+
 	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
-
-	if (ASYNCIO_MUTEX_LOCK(&threadpool_mtx) != 0) {
-		ASYNCIO_ERROR("Failed to lock threadpool mtx.\n");
-		rc = -1;
-		goto return_cancelstate;
-	}
-
-	/* Check for overflow */
-	if (handle->refcount >= ULONG_MAX) {
-		ASYNCIO_ERROR("handle refcount overflow.\n");
-		rc = -1;
-		goto return_threadpool_mtx;
-	}
-
-	++(handle->refcount);
-	rc = 0;
-
-return_threadpool_mtx:
-	ASYNCIO_MUTEX_UNLOCK(&threadpool_mtx);
-
-return_cancelstate:
+	rc = asyncio_refcount_acquire(&handle->refcount);
 	ASYNCIO_RESTORE_CANCELSTATE(oldstate);
+
 	ASYNCIO_DEBUG_RETURN(RET("%d", rc));
+
 	return rc;
 }
 
@@ -1053,33 +1053,11 @@ void asyncio_threadpool_release_handle(struct asyncio_threadpool_handle *handle)
 	int oldstate;
 
 	ASYNCIO_DEBUG_ENTER(1 ARG("%p", thandle));
+
 	ASYNCIO_DISABLE_CANCELLATIONS(&oldstate);
-
-	if (ASYNCIO_MUTEX_LOCK(&threadpool_mtx) != 0) {
-		ASYNCIO_ERROR("Failed to lock threadpool mtx.\n");
-		goto return_cancelstate;
-	}
-
-	/* Check for underflow */
-	if (handle->refcount == 0) {
-		ASYNCIO_ERROR("Handle refcount already 0 before release.\n");
-		goto return_threadpool_mtx;
-	}
-
-	--(handle->refcount);
-
-	if (handle->refcount == 0) {
-		ASYNCIO_MUTEX_UNLOCK(&threadpool_mtx);
-		cleanup_threadpool_handle(handle); /* Don't wanna do this while holding mtx */
-		asyncio_safe_free(handle);
-		goto return_cancelstate;
-	}
-
-return_threadpool_mtx:
-	ASYNCIO_MUTEX_UNLOCK(&threadpool_mtx);
-
-return_cancelstate:
+	asyncio_refcount_release(&handle->refcount);
 	ASYNCIO_RESTORE_CANCELSTATE(oldstate);
+
 	ASYNCIO_DEBUG_RETURN(VOIDRET);
 }
 

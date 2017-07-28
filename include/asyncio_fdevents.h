@@ -15,13 +15,6 @@
 struct asyncio_fdevents_handle_priv;
 struct asyncio_fdevents_loop_priv;
 
-struct asyncio_fdevents_loop;
-struct asyncio_fdevents_callback_info;
-
-typedef void (*asyncio_fdevents_callback)(const struct asyncio_fdevents_callback_info *info, int *continued);
-typedef void (*asyncio_fdevents_cancelled_callback)(void *arg);
-typedef void (*asyncio_fdevents_release_callback)(void *arg);
-
 struct asyncio_fdevents_callback_info {
 	const struct asyncio_fdevents_loop *eventloop;
 	int fd;
@@ -32,9 +25,8 @@ struct asyncio_fdevents_callback_info {
 struct asyncio_fdevents_listen_info {
 	int fd;
 	const void *evinfo;
-	asyncio_fdevents_callback cb;
-	asyncio_fdevents_cancelled_callback cancelled_cb;
-	asyncio_fdevents_release_callback release_cb;
+	void (*cb)(const struct asyncio_fdevents_callback_info *info, int *continued);
+	void (*cancelled_cb)(void *arg);
 	void *arg;
 	uint32_t threadpool_flags;
 };
@@ -45,15 +37,9 @@ struct asyncio_fdevents_listen_info {
 		info.evinfo = user_evinfo;\
 		info.cb = user_cb;\
 		info.cancelled_cb = NULL;\
-		info.release_cb = NULL;\
 		info.arg = NULL;\
 		info.threadpool_flags = ASYNCIO_THREADPOOL_FLAG_NONE;\
 	} while (0)
-
-struct asyncio_fdevents_options {
-	size_t max_nfds;
-	unsigned int backend_type;
-};
 
 struct asyncio_fdevents_handle {
 	struct asyncio_fdevents_handle_priv *priv;
@@ -76,6 +62,6 @@ struct asyncio_fdevents_loop {
 int asyncio_fdevents_set_nonblocking(int fd);
 int asyncio_fdevents_set_blocking(int fd);
 
-int asyncio_fdevents_eventloop(const struct asyncio_fdevents_options *options, struct asyncio_fdevents_loop **eventloop);
+int asyncio_fdevents_eventloop(size_t max_nfds, unsigned int backend_type, const void *opts, struct asyncio_fdevents_loop **eventloop);
 
 #endif

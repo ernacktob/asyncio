@@ -5,6 +5,7 @@
 
 #include "asyncio_threadpool.h"
 #include "queue.h"
+#include "refcounts.h"
 #include "threading.h"
 
 #define EVENTS_BACKEND_QUEUE_ID			0
@@ -24,7 +25,7 @@ struct events_handle {
 	int (*acquire)(struct events_handle *self);
 	void (*release)(struct events_handle *self);
 
-	unsigned long refcount;
+	struct refcount_base refcount;
 
 	struct events_handle *prev[NUMBER_EVENTS_HANDLE_QUEUES];
 	struct events_handle *next[NUMBER_EVENTS_HANDLE_QUEUES];
@@ -43,10 +44,9 @@ struct events_handle {
 };
 
 struct events_loop {
-	struct events_backend *backend;
+	struct refcount_base refcount;
 
 	ASYNCIO_MUTEX_T mtx;
-	unsigned long refcount;
 	int stopped;
 	int changed;
 
@@ -83,7 +83,7 @@ struct events_loop {
 
 	void (*backend_wakeup_eventloop_locked)(void *instance);
 	void (*backend_clearwake_eventloop_locked)(void *instance);
-	void (*backend_cleanup_eventloop)(void *instance);
+	void (*backend_destructor)(void *instance);
 };
 
 int asyncio_events_eventloop(struct events_loop *eventloop);

@@ -4,6 +4,7 @@
 #include "asyncio_threadpool.h"
 #include "events.h"
 #include "threading.h"
+#include "refcounts.h"
 #include "queue.h"
 #include "logging.h"
 
@@ -16,6 +17,7 @@ static void notify_events_handle_finished(struct events_handle *handle);
 static void fatal_error_on_handle(struct events_handle *handle);
 
 static int events_dispatch_handle_to_eventloop(struct events_loop *eventloop, struct events_handle *handle);
+static void events_handle_destructor(void *instance);
 static int events_handle_init(struct events_loop *eventloop, struct events_handle *handle, uint32_t threadpool_flags);
 static void events_handle_cleanup_before_dispatch(struct events_handle *handle);
 
@@ -32,6 +34,7 @@ static int events_handle_cancel(struct events_handle *handle);
 static int events_handle_acquire(struct events_handle *handle);
 static void events_handle_release(struct events_handle *handle);
 
+static void events_eventloop_destructor(void *instance);
 static int events_eventloop_acquire(struct events_loop *eventloop);
 static void events_eventloop_release(struct events_loop *eventloop);
 /* END PROTOTYPES */
@@ -112,6 +115,17 @@ static int events_dispatch_handle_to_eventloop(struct events_loop *eventloop, st
 	return 0;
 }
 
+static void events_handle_destructor(void *instance)
+{
+	struct events_handle *handle;
+
+	handle = instance;
+
+	/* We don't touch the threadpool_handle, this is controlled elsewhere. */
+	ASYNCIO_COND_DESTROY(&handle->finished_cond);
+	handle->eventloop->backend_cleanup_events_handle(handle->eventloop->instance, handle->instance);
+}
+
 static int events_handle_init(struct events_loop *eventloop, struct events_handle *handle, uint32_t threadpool_flags)
 {
 	handle->eventloop = eventloop;
@@ -126,7 +140,11 @@ static int events_handle_init(struct events_loop *eventloop, struct events_handl
 	 * handle. Also the events loop thread awakened must have a reference to
 	 * prevent the case where the client releases its handle before the loop
 	 * manages to acquire its handle */
-	handle->refcount = 2;
+	if (asyncio_refcount_init(&handle->refcount, handle, events_handle_destructor, 2) != 0) {
+		ASYNCIO_ERROR("Failed to init refcount.\n");
+		return -1;
+	}
+
 	handle->threadpool_flags = threadpool_flags;
 	handle->in_eventloop_database = 0;
 	handle->has_threadpool_handle = 0;
@@ -135,6 +153,7 @@ static int events_handle_init(struct events_loop *eventloop, struct events_handl
 
 	if (ASYNCIO_COND_INIT(&handle->finished_cond) != 0) {
 		ASYNCIO_ERROR("Failed to init handle finished_cond.\n");
+		asyncio_refcount_deinit(&handle->refcount);
 		return -1;
 	}
 
@@ -409,94 +428,27 @@ static int events_handle_cancel(struct events_handle *handle)
 
 static int events_handle_acquire(struct events_handle *handle)
 {
-	/* Note: In general, only one who owns a reference to handle can acquire it, for someone else.
-	 * This is to prevent race-conditions where last owner releases reference while someone else
-	 * acquires it (if the acquirer loses the lock race, they get dangling pointer) */
-	if (ASYNCIO_MUTEX_LOCK(&handle->eventloop->mtx) != 0) {
-		ASYNCIO_ERROR("Failed to lock handle's eventloop mtx.\n");
-		return -1;
-	}
-
-	if (handle->refcount == ULONG_MAX) {
-		ASYNCIO_ERROR("Reached maximum refcount for handle.");
-		ASYNCIO_MUTEX_UNLOCK(&handle->eventloop->mtx);
-		return -1;
-	}
-
-	++(handle->refcount);
-	ASYNCIO_MUTEX_UNLOCK(&handle->eventloop->mtx);
-
-	return 0;
+	return asyncio_refcount_acquire(&handle->refcount);
 }
 
 static void events_handle_release(struct events_handle *handle)
 {
-	if (ASYNCIO_MUTEX_LOCK(&handle->eventloop->mtx) != 0) {
-		ASYNCIO_ERROR("Failed to lock handle's eventloop mtx.\n");
-		return;
-	}
-
-	if (handle->refcount == 0) {
-		/* Shouldn't happen */
-		ASYNCIO_ERROR("events_handle refcount was 0 before dereference.\n");
-		return;
-	}
-
-	--(handle->refcount);
-
-	if (handle->refcount > 0) {
-		ASYNCIO_MUTEX_UNLOCK(&handle->eventloop->mtx);
-		return;
-	}
-
-	ASYNCIO_MUTEX_UNLOCK(&handle->eventloop->mtx);
-
-	ASYNCIO_COND_DESTROY(&handle->finished_cond);
-	handle->eventloop->backend_cleanup_events_handle(handle->eventloop->instance, handle->instance);
+	asyncio_refcount_release(&handle->refcount);
 }
 
-static int events_eventloop_acquire(struct events_loop *eventloop)
+static void events_eventloop_destructor(void *instance)
 {
-	if (ASYNCIO_MUTEX_LOCK(&eventloop->mtx) != 0) {
-		ASYNCIO_ERROR("Failed to lock eventloop mtx.\n");
-		return -1;
-	}
-
-	if (eventloop->refcount == ULONG_MAX) {
-		ASYNCIO_ERROR("Refcount for eventloop reached maximum.\n");
-		ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
-		return -1;
-	}
-
-	++(eventloop->refcount);
-	ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
-	return 0;
-}
-
-static void events_eventloop_release(struct events_loop *eventloop)
-{
+	struct events_loop *eventloop;
 	struct events_handle *handle;
 
+	eventloop = instance;
+
 	if (ASYNCIO_MUTEX_LOCK(&eventloop->mtx) != 0) {
-		ASYNCIO_ERROR("Failed to lock eventloop mtx.\n");
-		return;
-	}
-
-	if (eventloop->refcount == 0) {
-		ASYNCIO_ERROR("Refcount for eventloop already 0.\n");
-		ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
-		return;
-	}
-
-	--(eventloop->refcount);
-
-	if (eventloop->refcount > 0) {
-		ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
+		ASYNCIO_ERROR("Failed to lock eventloop eventloop mtx. This shouldn't happend, now we can't release ressources.\n");
 		return;
 	}
 
 	stop_eventloop_thread_locked(eventloop);
-
 	ASYNCIO_MUTEX_UNLOCK(&eventloop->mtx);
 
 	if (asyncio_threadpool_join(eventloop->threadpool_handle) != 0)
@@ -542,7 +494,17 @@ static void events_eventloop_release(struct events_loop *eventloop)
 
 	/* Destroy only once all handles have finished, but before backend cleanup. */
 	ASYNCIO_MUTEX_DESTROY(&eventloop->mtx);
-	eventloop->backend_cleanup_eventloop(eventloop->instance);
+	eventloop->backend_destructor(eventloop->instance);
+}
+
+static int events_eventloop_acquire(struct events_loop *eventloop)
+{
+	return asyncio_refcount_acquire(&eventloop->refcount);
+}
+
+static void events_eventloop_release(struct events_loop *eventloop)
+{
+	asyncio_refcount_release(&eventloop->refcount);
 }
 
 int asyncio_events_eventloop(struct events_loop *eventloop)
@@ -557,7 +519,12 @@ int asyncio_events_eventloop(struct events_loop *eventloop)
 	/* One refcount for the caller. The eventloop_thread itself doesn't get a reference
 	 * even though it has access to pointer, because when eventloop is released, there
 	 * will be a stop signal on the thread and release will wait until it has finished. */
-	eventloop->refcount = 1;
+	if (asyncio_refcount_init(&eventloop->refcount, eventloop, events_eventloop_destructor, 1) != 0) {
+		ASYNCIO_ERROR("Failed to init eventloop refcount.\n");
+		asyncio_threadpool_cleanup();
+		return -1;
+	}
+
 	eventloop->acquire = events_eventloop_acquire;
 	eventloop->release = events_eventloop_release;
 	eventloop->handle_init = events_handle_init;
@@ -571,6 +538,7 @@ int asyncio_events_eventloop(struct events_loop *eventloop)
 
 	if (ASYNCIO_MUTEX_INIT(&eventloop->mtx) != 0) {
 		ASYNCIO_ERROR("Failed to init eventloop mtx.\n");
+		asyncio_refcount_deinit(&eventloop->refcount);
 		asyncio_threadpool_cleanup();
 		return -1;
 	}
@@ -586,6 +554,7 @@ int asyncio_events_eventloop(struct events_loop *eventloop)
 	if (asyncio_threadpool_dispatch(&eventloop_task, &eventloop->threadpool_handle) != 0) {
 		ASYNCIO_ERROR("Failed to dispatch eventloop task.\n");
 		ASYNCIO_MUTEX_DESTROY(&eventloop->mtx);
+		asyncio_refcount_deinit(&eventloop->refcount);
 		asyncio_threadpool_cleanup();
 		return -1;
 	}

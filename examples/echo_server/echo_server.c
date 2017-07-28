@@ -288,7 +288,6 @@ static void accept_clients(const struct asyncio_fdevents_callback_info *info, in
 
 int main()
 {
-	struct asyncio_fdevents_options options;
 	struct asyncio_fdevents_loop *eventloop;
 	struct asyncio_fdevents_poll_evinfo evinfo;
 	struct asyncio_fdevents_listen_info listen_info;
@@ -302,10 +301,7 @@ int main()
 		return -1;
 	}
 
-	options.max_nfds = 10000;
-	options.backend_type = ASYNCIO_FDEVENTS_BACKEND_POLL;
-
-	if (asyncio_fdevents_eventloop(&options, &eventloop) != 0) {
+	if (asyncio_fdevents_eventloop(10000, ASYNCIO_FDEVENTS_BACKEND_POLL, NULL, &eventloop) != 0) {
 		fprintf(stderr, "Failed to create eventloop.\n");
 		close(accept_sockfd);
 		return -1;
