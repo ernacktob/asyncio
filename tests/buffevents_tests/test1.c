@@ -250,7 +250,7 @@ static void client_write_done(uint8_t *buf, size_t len, void *arg)
 
 static void client_connected(struct ConnectionState *state)
 {
-	const char *greeting = "Welcome to the echo server.\nType a line of at most 1000 characters, and it will be echoed back.\n\n";
+	const char *greeting = "Welcome to the echo server.\nType a line of any length, and it will be echoed back.\n\n";
 	struct asyncio_fdevents_poll_evinfo evinfo;
 	struct asyncio_buffevents_write_info write_info;
 	struct asyncio_buffevents_handle *handle;
