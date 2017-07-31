@@ -4,7 +4,7 @@ CC = gcc
 
 .PHONY: all incdir libfile header_files clean
 
-all: buffevents_tests fdevents_tests hashtable_tests threadpool_tests
+all: streams_tests fdevents_tests hashtable_tests threadpool_tests
 
 incdir:
 	mkdir -p include
@@ -14,8 +14,8 @@ HEADERS = $(wildcard $(IDIR)/*.h)
 header_files: incdir $(HEADERS)
 	cp $(IDIR)/*.h include/
 
-buffevents_tests: libfile header_files
-	$(MAKE) -C buffevents_tests
+streams_tests: libfile header_files
+	$(MAKE) -C streams_tests
 
 fdevents_tests: libfile header_files
 	$(MAKE) -C fdevents_tests
@@ -28,7 +28,7 @@ threadpool_tests: libfile header_files
 
 clean:
 	rm -rf include
-	$(MAKE) -C buffevents_tests clean
+	$(MAKE) -C streams_tests clean
 	$(MAKE) -C fdevents_tests clean
 	$(MAKE) -C hashtable_tests clean
 	$(MAKE) -C threadpool_tests clean

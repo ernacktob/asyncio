@@ -326,6 +326,7 @@ static int fdevents_select_wait_for_events(void *backend_data)
 
 	selectinfo = backend_data;
 
+	/* XXX Should ignore EINTR */
 	rc = select(selectinfo->scratch_nfds, &selectinfo->scratch_readfds, &selectinfo->scratch_writefds, &selectinfo->scratch_errorfds, NULL);
 
 	/* On success select() returns the number of fds in the sets. On error it returns -1. On timeout it returns 0. */

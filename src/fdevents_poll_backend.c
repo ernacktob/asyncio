@@ -257,6 +257,7 @@ static int fdevents_poll_wait_for_events(void *backend_data)
 
 	pollinfo = backend_data;
 
+	/* XXX Should ignore EINTR */
 	if (poll(pollinfo->scratch_fds, pollinfo->scratch_nfds, -1) < 0) {
 		ASYNCIO_SYSERROR("poll");
 		return -1;

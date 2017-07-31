@@ -8,7 +8,7 @@
 #include <netinet/in.h>
 #include <sys/errno.h>
 
-#include "asyncio_buffevents.h"
+#include "asyncio_streams.h"
 #include "asyncio_fdevents.h"
 #include "asyncio_threadpool.h"
 
@@ -16,14 +16,16 @@
 #define PORT		12345
 #define BACKLOG_SIZE	1
 
-#define MAX_STRLEN	1000
+#define MAX_BUFLEN	1000
 
-/* XXX Idea: merge the read and write of buffevents, pass buf as const uint8_t *, remove buf_to_free, and force user to use arg for freeing stuff. */
 /* STRUCT DEFINITIONS */
 struct ConnectionState {
-	char read_buffer[MAX_STRLEN];
-	const struct asyncio_fdevents_loop *eventloop;
-	int client_sock;
+	char read_buffer[MAX_BUFLEN];
+	char write_buffer[MAX_BUFLEN];
+	size_t read_pos;
+	struct asyncio_fdevents_poll_evinfo read_evinfo;
+	struct asyncio_fdevents_poll_evinfo write_evinfo;
+	struct asyncio_streams_policy policy;
 };
 /* END STRUCT DEFINITIONS */
 
@@ -31,16 +33,17 @@ struct ConnectionState {
 static struct ConnectionState *ConnectionState_create(const struct asyncio_fdevents_loop *eventloop, int client_sock);
 static void ConnectionState_destroy(struct ConnectionState *state);
 
-static int is_line(const uint8_t *buf, size_t len, void *arg);
+static int has_newline(size_t len, uint8_t **unread_buf, size_t *unread_len, void *state);
 static int create_accept_sock(void);
 
-static int check_evinfo_errors(const void *revinfo);
-static int client_read(int fd, uint8_t *buf, size_t len, size_t *rdlen, void *arg);
-static int client_write(int fd, const uint8_t *buf, size_t len, size_t *wrlen, void *arg);
-static void client_error(void *arg);
+static int check_evinfo_errors(const void *revinfo, void *state);
+static int client_read(uint8_t *buf, size_t len, size_t *rdlen, void *state);
+static int client_write(const uint8_t *buf, size_t len, size_t *wrlen, void *state);
+static void client_closed(void *state);
+static void client_error(void *state);
 
-static void client_read_done(uint8_t *buf, size_t len, void *arg);
-static void client_write_done(uint8_t *buf, size_t len, void *arg);
+static void client_read_done(size_t len, void *state);
+static void client_write_done(void *state);
 static void client_connected(struct ConnectionState *state);
 static void accept_clients(const struct asyncio_fdevents_callback_info *info, int *continued);
 /* END PROTOTYPES */
@@ -56,9 +59,30 @@ static struct ConnectionState *ConnectionState_create(const struct asyncio_fdeve
 		return NULL;
 	}
 
-	state->read_buffer[0] = '\0';
-	state->eventloop = eventloop;
-	state->client_sock = client_sock;
+	state->read_pos = 0;
+
+	state->read_evinfo.events = POLLIN;
+	state->write_evinfo.events = POLLOUT;
+
+	state->policy.eventloop = eventloop;
+	state->policy.read_evinfo = &state->read_evinfo;
+	state->policy.write_evinfo = &state->write_evinfo;
+
+	state->policy.state = state;
+
+	state->policy.fd = client_sock;
+	state->policy.threadpool_flags = ASYNCIO_THREADPOOL_FLAG_NONE;
+
+	state->policy.is_errored = check_evinfo_errors;
+
+	state->policy.read_cb = client_read;
+	state->policy.write_cb = client_write;
+
+	state->policy.until_cb = has_newline;
+
+	state->policy.eof_cb = client_closed;
+	state->policy.error_cb = client_error;
+	state->policy.cancelled_cb = NULL;
 
 	return state;
 }
@@ -66,14 +90,42 @@ static struct ConnectionState *ConnectionState_create(const struct asyncio_fdeve
 static void ConnectionState_destroy(struct ConnectionState *state)
 {
 	/* Don't release eventloop, we have only 1 reference and it is kept until main returns... */
-	close(state->client_sock);
+	close(state->policy.fd);
 	free(state);
 }
 
-static int is_line(const uint8_t *buf, size_t len, void *arg)
+static int has_newline(size_t len, uint8_t **unread_buf, size_t *unread_len, void *cstate)
 {
-	(void)arg;
-	return buf[len - 1] == '\n';
+	struct ConnectionState *state;
+	uint8_t *newline;
+	size_t linelen;
+
+	state = cstate;
+
+	newline = memchr(state->read_buffer, '\n', len);
+
+	if (newline != NULL) {
+		linelen = newline - (uint8_t *)(state->read_buffer);
+
+		/* linelen doesn't include the newline */
+		if (linelen < len - 1) {
+			*unread_len = len - linelen - 1;
+			*unread_buf = (uint8_t *)(state->read_buffer);
+			state->read_pos = *unread_len;
+		} else {
+			*unread_len = 0;
+			*unread_buf = NULL;
+			state->read_pos = 0;
+		}
+
+		return 1;
+	}
+
+	*unread_len = 0;
+	*unread_buf = NULL;
+	state->read_pos = 0;
+
+	return 0;
 }
 
 static int create_accept_sock()
@@ -128,40 +180,43 @@ static int create_accept_sock()
 	return accept_sock;
 }
 
-static int check_evinfo_errors(const void *revinfo)
+static int check_evinfo_errors(const void *revinfo, void *state)
 {
 	const struct asyncio_fdevents_poll_evinfo *pollrevinfo;
+	(void)state;
 
 	pollrevinfo = revinfo;
 	return pollrevinfo->events & (POLLERR | POLLHUP | POLLNVAL);
 }
 
-static int client_read(int fd, uint8_t *buf, size_t len, size_t *rdlen, void *arg)
+static int client_read(uint8_t *buf, size_t len, size_t *rdlen, void *cstate)
 {
+	struct ConnectionState *state;
 	ssize_t rb;
-	(void)arg;
-	(void)len;
 
-	rb = recv(fd, buf, 1, 0);
+	state = cstate;
+	rb = recv(state->policy.fd, buf, len, 0);
 
 	if (rb < 0) {
 		perror("recv");
 		return -1;
 	} else if (rb == 0) {
-		/* Connection closed? XXX handle separately? */
-		return -1;
+		/* Connection closed -> EOF */
+		*rdlen = 0;
+		return 0;
 	}
 
-	*rdlen = 1;
+	*rdlen = rb;
 	return 0;
 }
 
-static int client_write(int fd, const uint8_t *buf, size_t len, size_t *wrlen, void *arg)
+static int client_write(const uint8_t *buf, size_t len, size_t *wrlen, void *cstate)
 {
+	struct ConnectionState *state;
 	ssize_t sb;
-	(void)arg;
 
-	sb = send(fd, buf, len, 0);
+	state = cstate;
+	sb = send(state->policy.fd, buf, len, 0);
 
 	if (sb < 0) {
 		perror("send");
@@ -172,40 +227,33 @@ static int client_write(int fd, const uint8_t *buf, size_t len, size_t *wrlen, v
 	return 0;
 }
 
-static void client_error(void *arg)
+static void client_closed(void *cstate)
 {
 	struct ConnectionState *state;
 
-	state = arg;
+	state = cstate;
 	ConnectionState_destroy(state);
 }
 
-static void client_read_done(uint8_t *buf, size_t len, void *arg)
+static void client_error(void *cstate)
 {
 	struct ConnectionState *state;
-	struct asyncio_fdevents_poll_evinfo evinfo;
-	struct asyncio_buffevents_write_info write_info;
-	struct asyncio_buffevents_handle *handle;
 
-	state = arg;
+	state = cstate;
+	ConnectionState_destroy(state);
+}
 
-	evinfo.events = POLLOUT;
-	write_info.eventloop = state->eventloop;
-	write_info.evinfo = &evinfo;
-	write_info.fd = state->client_sock;
-	write_info.buf = buf;
-	write_info.len = len;
-	write_info.arg = state;
-	write_info.buf_to_free = NULL;
-	write_info.threadpool_flags = ASYNCIO_THREADPOOL_FLAG_NONE;
-	write_info.is_errored = check_evinfo_errors;
-	write_info.write_cb = client_write;
-	write_info.error_cb = client_error;
-	write_info.cancelled_cb = NULL;
-	write_info.done_cb = client_write_done;
+static void client_read_done(size_t len, void *cstate)
+{
+	struct ConnectionState *state;
+	struct asyncio_streams_handle *handle;
 
-	if (asyncio_buffevents_write(&write_info, &handle) != 0) {
-		fprintf(stderr, "Failed to recv buffer to read.\n");
+	state = cstate;
+
+	memcpy(state->write_buffer, state->read_buffer, len);
+
+	if (asyncio_streams_write((uint8_t *)(state->write_buffer), len, client_write_done, &state->policy, &handle) != 0) {
+		fprintf(stderr, "Failed to register buffer to write.\n");
 		ConnectionState_destroy(state);
 		return;
 	}
@@ -213,34 +261,16 @@ static void client_read_done(uint8_t *buf, size_t len, void *arg)
 	handle->release(handle);
 }
 
-static void client_write_done(uint8_t *buf, size_t len, void *arg)
+static void client_write_done(void *cstate)
 {
 	struct ConnectionState *state;
-	struct asyncio_fdevents_poll_evinfo evinfo;
-	struct asyncio_buffevents_read_info read_info;
-	struct asyncio_buffevents_handle *handle;
-	(void)buf;
-	(void)len;
+	struct asyncio_streams_handle *handle;
 
-	state = arg;
-	evinfo.events = POLLIN;
+	state = cstate;
 
-	read_info.eventloop = state->eventloop;
-	read_info.evinfo = &evinfo;
-	read_info.fd = state->client_sock;
-	read_info.buf = (uint8_t *)(state->read_buffer);
-	read_info.len = MAX_STRLEN;
-	read_info.arg = state;
-	read_info.threadpool_flags = ASYNCIO_THREADPOOL_FLAG_NONE;
-	read_info.is_errored = check_evinfo_errors;
-	read_info.read_cb = client_read;
-	read_info.until_cb = is_line;
-	read_info.error_cb = client_error;
-	read_info.cancelled_cb = NULL;
-	read_info.done_cb = client_read_done;
-
-	if (asyncio_buffevents_read(&read_info, &handle) != 0) {
-		fprintf(stderr, "Failed to recv buffer to read.\n");
+	/* We might already have things in the read_buffer because of the has_newline callback */
+	if (asyncio_streams_read((uint8_t *)(state->read_buffer + state->read_pos), MAX_BUFLEN - state->read_pos, client_read_done, &state->policy, &handle) != 0) {
+		fprintf(stderr, "Failed to register buffer to read.\n");
 		ConnectionState_destroy(state);
 		return;
 	}
@@ -251,26 +281,9 @@ static void client_write_done(uint8_t *buf, size_t len, void *arg)
 static void client_connected(struct ConnectionState *state)
 {
 	const char *greeting = "Welcome to the echo server.\nType a line of any length, and it will be echoed back.\n\n";
-	struct asyncio_fdevents_poll_evinfo evinfo;
-	struct asyncio_buffevents_write_info write_info;
-	struct asyncio_buffevents_handle *handle;
+	struct asyncio_streams_handle *handle;
 
-	evinfo.events = POLLOUT;
-	write_info.eventloop = state->eventloop;
-	write_info.evinfo = &evinfo;
-	write_info.fd = state->client_sock;
-	write_info.buf = (const uint8_t *)greeting;
-	write_info.len = strlen(greeting);
-	write_info.arg = state;
-	write_info.buf_to_free = NULL;
-	write_info.threadpool_flags = ASYNCIO_THREADPOOL_FLAG_NONE;
-	write_info.is_errored = check_evinfo_errors;
-	write_info.write_cb = client_write;
-	write_info.error_cb = client_error;
-	write_info.cancelled_cb = NULL;
-	write_info.done_cb = client_write_done;
-
-	if (asyncio_buffevents_write(&write_info, &handle) != 0) {
+	if (asyncio_streams_write((const uint8_t *)greeting, strlen(greeting), client_write_done, &state->policy, &handle) != 0) {
 		fprintf(stderr, "Failed to send buffer to write.\n");
 		ConnectionState_destroy(state);
 		return;
